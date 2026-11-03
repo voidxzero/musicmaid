@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MusicMaid
+GenericName=Music Tagger
+Comment=Tag, clean up, de-duplicate and organize your music library
+Exec=musicmaid
+Icon=audio-x-generic
+Terminal=false
+Categories=AudioVideo;Audio;Utility;
