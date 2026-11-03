@@ -148,7 +148,7 @@ class MusicMaidTUI(TaskMixin, App):
                 self.call_after_refresh(self._offer_fpcalc)
         if self.lib.settings.check_for_updates:
             self._check_updates()
-        if not self.lib.settings.acoustid_api_key:
+        if not self.lib.settings.acoustid_key:
             self.log_message("Tip: add a free AcoustID API key in Settings (,) to identify tracks by their audio.")
 
     # ------------------------------------------------------------ data

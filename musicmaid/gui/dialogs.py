@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
     QSpinBox, QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
@@ -51,8 +51,14 @@ class SettingsDialog(QDialog):
 
         self.acoustid = QLineEdit(s.acoustid_api_key)
         self.acoustid.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
-        link = QLabel('<a href="https://acoustid.org/new-application">Get a free AcoustID API key</a> '
-                      "— lets MusicMaid identify songs by their sound, even with no tags at all.")
+        from ..config import BUILTIN_ACOUSTID_KEY
+        if BUILTIN_ACOUSTID_KEY:
+            self.acoustid.setPlaceholderText("optional: MusicMaid's built-in key is used")
+            link = QLabel("Identifies songs by their sound. Works out of the box; only enter a key here if you "
+                          'have <a href="https://acoustid.org/new-application">your own AcoustID key</a>.')
+        else:
+            link = QLabel('<a href="https://acoustid.org/new-application">Get a free AcoustID API key</a> '
+                          "— lets MusicMaid identify songs by their sound, even with no tags at all.")
         link.setOpenExternalLinks(True)
         link.setWordWrap(True)
         form.addRow("AcoustID API key", self.acoustid)
@@ -106,6 +112,11 @@ class SettingsDialog(QDialog):
         form.addRow("", self.recycle)
         self.va = QLineEdit(s.various_artists_name)
         form.addRow("Various artists name", self.va)
+        from . import themes
+        self.theme = QComboBox()
+        self.theme.addItems(themes.THEMES)
+        self.theme.setCurrentText(s.theme if s.theme in themes.THEMES else "System")
+        form.addRow("Theme", self.theme)
         self.updates = QCheckBox("Check for updates when MusicMaid starts")
         self.updates.setChecked(s.check_for_updates)
         form.addRow("", self.updates)
@@ -124,6 +135,13 @@ class SettingsDialog(QDialog):
         if self.updates.isChecked() and not s.check_for_updates:
             s.skipped_update = ""
         s.check_for_updates = self.updates.isChecked()
+        if self.theme.currentText() != s.theme:
+            from . import themes
+            s.theme = themes.apply(self.theme.currentText())
+            parent = self.parent()
+            if parent is not None and hasattr(parent, "theme_group"):
+                for a in parent.theme_group.actions():
+                    a.setChecked(a.text() == s.theme)
         s.auto_apply_threshold = self.threshold.value()
         s.prefer_country = self.country.text().strip().upper()
         s.prefer_album_releases = self.prefer_album.isChecked()

@@ -117,7 +117,7 @@ class EditScreen(ModalScreen[dict | None]):
 
 # ---------------------------------------------------------------- settings
 _SETTINGS_FORM = [
-    ("acoustid_api_key", "AcoustID API key (free: acoustid.org/new-application)"),
+    ("acoustid_api_key", "AcoustID API key (optional when MusicMaid has a built-in key)"),
     ("fpcalc_path", "fpcalc path (empty = auto)"),
     ("auto_apply_threshold", "Auto-apply matches scoring at least (0-1)"),
     ("prefer_country", "Preferred release country (e.g. US, GB)"),

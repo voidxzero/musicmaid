@@ -267,7 +267,7 @@ class Identifier:
         self.db = db
         self.settings = settings or load_settings()
         self.task = task
-        self.use_acoustid = bool(self.settings.acoustid_api_key) and fpmod.find_fpcalc() is not None
+        self.use_acoustid = bool(self.settings.acoustid_key) and fpmod.find_fpcalc() is not None
 
     # -- per-track candidates
     def _acoustid_candidates(self, track: Track) -> list[Candidate]:
@@ -275,7 +275,7 @@ class Identifier:
             duration, fp = fpmod.ensure_compressed(self.db, track)
             if not fp:
                 return []
-            return candidates_from_acoustid(acoustid.lookup(self.settings.acoustid_api_key, fp, duration))
+            return candidates_from_acoustid(acoustid.lookup(self.settings.acoustid_key, fp, duration))
         except acoustid.AcoustIDError as e:
             self.task.log(str(e))
             if "api key" in str(e).lower():

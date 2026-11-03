@@ -34,6 +34,8 @@ It comes with three front-ends that share one engine:
   `{albumartist}/{album} ({year})/{disc_prefix}{tracknumber:02} - {title}`. File names are made safe for
   Windows and Linux, `.lrc`/`.cue` sidecars and folder art move along, empty folders are removed and
   folder-name casing is reused.
+* **Themes.** *System* follows your desktop's light or dark mode, or pick Light, Dark, Midnight, Graphite,
+  Forest or Rose under **View → Theme** or in **Settings**.
 * **Safe by default.** Automatic results become **proposals** that you review (see *Needs review*) before
   anything is written. Only matches above a confidence threshold (default 90%) are written automatically
   by *Auto-tag*. **Every** tag write, move and duplicate removal is journaled and can be **undone**.

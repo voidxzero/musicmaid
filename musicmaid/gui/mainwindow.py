@@ -21,6 +21,7 @@ from ..fingerprint import can_download_fpcalc, download_fpcalc, find_fpcalc
 from ..library import VIEWS, Library
 from .dialogs import ArtworkDialog, DuplicatesDialog, HistoryDialog, OrganizeDialog, SettingsDialog
 from .. import updater
+from . import themes
 from .workers import TaskRunner, background
 
 COLUMNS = [
@@ -497,6 +498,16 @@ class MainWindow(QMainWindow):
         lib_menu = m.addMenu("&Library")
         for a in (self.a_dupes, self.a_org, self.a_select_all, self.a_log):
             lib_menu.addAction(a)
+        v = m.addMenu("&View")
+        theme_menu = v.addMenu("&Theme")
+        from PySide6.QtGui import QActionGroup
+        self.theme_group = QActionGroup(self)
+        for name in themes.THEMES:
+            a = QAction(name, self, checkable=True)
+            a.setChecked(name == self.lib.settings.theme)
+            a.triggered.connect(lambda _=False, n=name: self.set_theme(n))
+            self.theme_group.addAction(a)
+            theme_menu.addAction(a)
         h = m.addMenu("&Help")
         h.addAction(self._act("Check for Updates…", lambda: self.check_updates(manual=True)))
         h.addAction(self._act("Download fpcalc (Chromaprint)…", self.get_fpcalc))
@@ -538,6 +549,12 @@ class MainWindow(QMainWindow):
                                     "Start by adding your music folder. Nothing is changed on disk until you apply "
                                     "changes, and every change can be undone.")
             self.add_folder()
+
+    def set_theme(self, name: str) -> None:
+        self.lib.settings.theme = themes.apply(name)
+        save_settings(self.lib.settings)
+        for a in self.theme_group.actions():
+            a.setChecked(a.text() == self.lib.settings.theme)
 
     # ------------------------------------------------------------ updates
     def check_updates(self, manual: bool) -> None:
@@ -872,8 +889,10 @@ def main() -> int:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("MusicMaid.MusicMaid")
         except Exception:
             pass
-    if sys.platform == "win32":
-        app.setStyle("Fusion")
+    from ..config import load_settings
+    settings = load_settings()
+    settings.theme = themes.apply(settings.theme, app)
+    themes.follow_system_changes(app, lambda: load_settings().theme)
     win = MainWindow()
     win.show()
     return app.exec()
