@@ -35,7 +35,7 @@ class Settings:
     fpcalc_path: str = ""  # empty = auto-detect
     offer_fpcalc_download: bool = True  # ask at startup when fpcalc is missing
     offer_acoustid_key: bool = True  # ask at startup when no AcoustID key is set
-    theme: str = "System"  # GUI colour theme (see gui/themes.py)
+    skin: str = ""  # GUI skin (see gui/skins.py); empty = the platform default, "System" = desktop look
     check_for_updates: bool = True  # look for a new release on GitHub at startup
     skipped_update: str = ""  # version the user chose to skip
     # identification

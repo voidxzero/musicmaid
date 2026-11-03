@@ -21,7 +21,7 @@ from ..fingerprint import can_download_fpcalc, download_fpcalc, find_fpcalc
 from ..library import VIEWS, Library
 from .dialogs import AcoustIDDialog, ArtworkDialog, DuplicatesDialog, HistoryDialog, OrganizeDialog, SettingsDialog
 from .. import updater
-from . import themes
+from . import skins
 from .workers import TaskRunner, background
 
 COLUMNS = [
@@ -29,9 +29,19 @@ COLUMNS = [
     ("tracknumber", "#"), ("date", "Year"), ("genre", "Genre"), ("format", "Format"), ("duration", "Length"),
     ("path", "File"),
 ]
+# status colours: replaced by the skin's good/warn/bad colours when a skin is applied
 GREEN = QColor(46, 160, 67)
 AMBER = QColor(210, 153, 34)
 RED = QColor(218, 54, 51)
+DIM = QColor(140, 140, 140)
+
+
+def _set_status_colors(name: str) -> None:
+    c = skins.colors(name)
+    GREEN.setRgb(QColor(c.get("good", "#2ea043")).rgb())
+    AMBER.setRgb(QColor(c.get("warn", "#d29922")).rgb())
+    RED.setRgb(QColor(c.get("bad", "#da3633")).rgb())
+    DIM.setRgb(QColor(c.get("dim", "#8c8c8c")).rgb())
 
 
 # ---------------------------------------------------------------- table model
@@ -95,7 +105,7 @@ class TrackModel(QAbstractTableModel):
             if key == "state":
                 return QBrush(self._state(t)[1])
             if key == "title" and not t.get("title"):
-                return QBrush(QColor(140, 140, 140))
+                return QBrush(DIM)
         if role == Qt.ItemDataRole.ToolTipRole and key == "state":
             return self._state(t)[2]
         if role == Qt.ItemDataRole.UserRole:  # sort key
@@ -219,7 +229,7 @@ class DetailPanel(QWidget):
         lay.addLayout(save_row)
         self.info = QLabel()
         self.info.setWordWrap(True)
-        self.info.setStyleSheet("color: gray")
+        self.info.setObjectName("dim")
         self.info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(self.info)
         self.dirty: set[str] = set()
@@ -254,7 +264,7 @@ class DetailPanel(QWidget):
             if proposed != {None}:
                 new_vals = {p for p in proposed if p is not None}
                 old = ", ".join(sorted(v for v in values if v)) or "(empty)"
-                e.setStyleSheet("QLineEdit { background: rgba(46,160,67,0.18); }")
+                e.setStyleSheet(f"QLineEdit {{ background: rgba({GREEN.red()},{GREEN.green()},{GREEN.blue()},0.22); }}")
                 e.setToolTip(f"Proposed change (not saved yet). Current: {old}")
                 e.setText(next(iter(new_vals)) if len(new_vals) == 1 else "")
                 e.setPlaceholderText("<different proposals>" if len(new_vals) > 1 else "")
@@ -414,6 +424,7 @@ class MainWindow(QMainWindow):
 
         # log dock
         self.log_view = QPlainTextEdit()
+        self.log_view.setObjectName("log")
         self.log_view.setReadOnly(True)
         self.log_dock = QDockWidget("Log", self)
         self.log_dock.setWidget(self.log_view)
@@ -499,15 +510,8 @@ class MainWindow(QMainWindow):
         for a in (self.a_dupes, self.a_org, self.a_select_all, self.a_log):
             lib_menu.addAction(a)
         v = m.addMenu("&View")
-        theme_menu = v.addMenu("&Theme")
-        from PySide6.QtGui import QActionGroup
-        self.theme_group = QActionGroup(self)
-        for name in themes.THEMES:
-            a = QAction(name, self, checkable=True)
-            a.setChecked(name == self.lib.settings.theme)
-            a.triggered.connect(lambda _=False, n=name: self.set_theme(n))
-            self.theme_group.addAction(a)
-            theme_menu.addAction(a)
+        self.skin_menu = v.addMenu("&Skin")
+        self.fill_skin_menu()
         h = m.addMenu("&Help")
         h.addAction(self._act("Check for Updates…", lambda: self.check_updates(manual=True)))
         h.addAction(self._act("Identify by Sound (AcoustID Key)…", lambda: self.acoustid_key(first_run=False)))
@@ -567,11 +571,52 @@ class MainWindow(QMainWindow):
         elif had and not has:
             self._log("AcoustID key removed: songs are identified from tags and file names only.")
 
-    def set_theme(self, name: str) -> None:
-        self.lib.settings.theme = themes.apply(name)
+    # ------------------------------------------------------------ skins
+    def fill_skin_menu(self) -> None:
+        """View ▸ Skin: System, the built-in skins, then skins from skin files (refilled after an import)."""
+        from PySide6.QtGui import QActionGroup
+        self.skin_menu.clear()
+        self.skin_group = QActionGroup(self)
+        separated = False
+        current = self.lib.settings.skin or skins.DEFAULT_SKIN
+        for name in skins.theme_names():
+            if name not in skins.BUILTIN_SKINS and name != skins.SYSTEM and not separated:
+                self.skin_menu.addSeparator()
+                separated = True
+            a = QAction(name, self, checkable=True)
+            a.setChecked(name == current)
+            a.triggered.connect(lambda _=False, n=name: self.set_skin(n))
+            self.skin_group.addAction(a)
+            self.skin_menu.addAction(a)
+        self.skin_menu.addSeparator()
+        self.skin_menu.addAction(self._act("Import Skin…", self.import_skin))
+
+    def apply_skin(self, name: str) -> str:
+        """Show a skin without saving it (also used for live preview in Settings)."""
+        name = skins.apply(name)
+        _set_status_colors(name)
+        self.table.viewport().update()
+        self.detail.show_tracks(self.detail.tracks)   # re-tint proposed-change fields
+        for a in self.skin_group.actions():
+            a.setChecked(a.text() == name)
+        return name
+
+    def set_skin(self, name: str) -> None:
+        self.lib.settings.skin = self.apply_skin(name)
         save_settings(self.lib.settings)
-        for a in self.theme_group.actions():
-            a.setChecked(a.text() == self.lib.settings.theme)
+
+    def import_skin(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Import skin", str(Path.home()), "Skins (*.json)")
+        if not path:
+            return
+        try:
+            name = skins.import_skin(path)
+        except ValueError as e:
+            QMessageBox.warning(self, "Import skin", f"That isn't a skin MusicMaid can use: {e}")
+            return
+        self.fill_skin_menu()
+        self.set_skin(name)
+        self._log(f"Imported the skin \"{name}\".")
 
     # ------------------------------------------------------------ updates
     def check_updates(self, manual: bool) -> None:
@@ -906,11 +951,13 @@ def main() -> int:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("MusicMaid.MusicMaid")
         except Exception:
             pass
-    from ..config import load_settings
-    settings = load_settings()
-    settings.theme = themes.apply(settings.theme, app)
-    themes.follow_system_changes(app, lambda: load_settings().theme)
+    from . import winstyle
+    winstyle.init(app)                    # Windows: title bars in the skin's colours, live dark/light
     win = MainWindow()
+    win.apply_skin(win.lib.settings.skin or skins.DEFAULT_SKIN)
+    for err in skins.skin_errors:
+        win._log(err)
+    winstyle.on_scheme_change(lambda: win.apply_skin(win.lib.settings.skin or skins.DEFAULT_SKIN))
     win.show()
     return app.exec()
 

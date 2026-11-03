@@ -34,7 +34,7 @@ musicmaid = "musicmaid.__main__:main"
 include = ["musicmaid*"]
 
 [tool.setuptools.package-data]
-musicmaid = ["assets/*"]
+musicmaid = ["assets/*", "skins/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

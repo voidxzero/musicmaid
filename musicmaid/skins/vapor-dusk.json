@@ -1,0 +1,32 @@
+{
+  "spindle_skin": 1,
+  "name": "Vapor Dusk",
+  "author": "Spindle",
+  "base": "Modern Night",
+  "colors": {
+    "bg": "#140b24",
+    "panel_top": "#3a1d5c",
+    "panel_bot": "#24123d",
+    "inset": "#0d0619",
+    "border": "#5b2f8a",
+    "hilite": "#a05ad8",
+    "text": "#f3e8ff",
+    "dim": "#b39ccf",
+    "accent": "#ff4fb8",
+    "accent_text": "#24051a",
+    "lcd_bg": "#0a0414",
+    "lcd_fg": "#4ff0ff",
+    "lcd_dim": "#1f4a66",
+    "sel": "#7a2fb8",
+    "sel_text": "#ffffff",
+    "title_top": "#4a2672",
+    "title_bot": "#2a1545",
+    "btn_top": "#43226a",
+    "btn_bot": "#28143f",
+    "good": "#4ff0b0",
+    "warn": "#ffcf5a",
+    "bad": "#ff5a7a",
+    "alt": "#1a0d2e"
+  },
+  "corners": {"r": 3, "r_panel": 4, "r_rail": 6}
+}

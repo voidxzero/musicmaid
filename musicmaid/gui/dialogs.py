@@ -108,11 +108,28 @@ class SettingsDialog(QDialog):
         form.addRow("", self.recycle)
         self.va = QLineEdit(s.various_artists_name)
         form.addRow("Various artists name", self.va)
-        from . import themes
-        self.theme = QComboBox()
-        self.theme.addItems(themes.THEMES)
-        self.theme.setCurrentText(s.theme if s.theme in themes.THEMES else "System")
-        form.addRow("Theme", self.theme)
+        from . import skins
+        self._orig_skin = s.skin or skins.DEFAULT_SKIN
+        self.skin = QComboBox()
+        self.skin.addItems(skins.theme_names())
+        self.skin.setCurrentText(self._orig_skin)
+        self.skin.currentTextChanged.connect(self._preview_skin)   # selecting a skin previews it
+        form.addRow("Skin", self.skin)
+        skin_row = QHBoxLayout()
+        for text, slot, tip in (("Import skin…", self._import_skin, "Add a skin file (.json), e.g. one from Spindle"),
+                                ("Save a copy to edit…", self._export_skin,
+                                 "Write the selected skin to a file you can edit and import as your own skin"),
+                                ("Open skins folder", self._open_skins, "")):
+            b = QPushButton(text)
+            b.clicked.connect(slot)
+            if tip:
+                b.setToolTip(tip)
+            skin_row.addWidget(b)
+        skin_row.addStretch(1)
+        skin_w = QWidget()
+        skin_row.setContentsMargins(0, 0, 0, 0)
+        skin_w.setLayout(skin_row)
+        form.addRow("", skin_w)
         self.updates = QCheckBox("Check for updates when MusicMaid starts")
         self.updates.setChecked(s.check_for_updates)
         form.addRow("", self.updates)
@@ -124,6 +141,66 @@ class SettingsDialog(QDialog):
         lay.addLayout(form)
         lay.addWidget(buttons)
 
+    # skins: preview live, keep on Save, restore on Cancel
+    def _preview_skin(self, name: str) -> None:
+        parent = self.parent()
+        if name and parent is not None and hasattr(parent, "apply_skin"):
+            parent.apply_skin(name)
+
+    def reject(self) -> None:
+        if self.skin.currentText() != self._orig_skin:
+            self._preview_skin(self._orig_skin)
+        super().reject()
+
+    def _refresh_skins(self, select: str = "") -> None:
+        cur = select or self.skin.currentText()
+        self.skin.blockSignals(True)
+        self.skin.clear()
+        from . import skins
+        self.skin.addItems(skins.theme_names())
+        self.skin.blockSignals(False)
+        self.skin.setCurrentText(cur)
+        self._preview_skin(cur)
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "fill_skin_menu"):
+            parent.fill_skin_menu()
+
+    def _import_skin(self) -> None:
+        from . import skins
+        path, _ = QFileDialog.getOpenFileName(self, "Import skin", str(Path.home()), "Skins (*.json)")
+        if not path:
+            return
+        try:
+            name = skins.import_skin(path)
+        except ValueError as e:
+            QMessageBox.warning(self, "Import skin", f"That isn't a skin MusicMaid can use: {e}")
+            return
+        self._refresh_skins(select=name)
+        QMessageBox.information(self, "Import skin", f"Added the skin \"{name}\". Press Save to keep using it.")
+
+    def _export_skin(self) -> None:
+        from . import skins
+        name = self.skin.currentText()
+        if name not in skins.THEMES:
+            QMessageBox.information(self, "Save a copy", "Choose one of the skins first (System follows your "
+                                    "desktop and can't be saved as a skin).")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save a copy to edit",
+                                              str(Path.home() / f"my-{skins._slug(name)}.json"), "Skins (*.json)")
+        if path:
+            skins.export_skin(name, path)
+            QMessageBox.information(self, "Save a copy", f"Saved. Edit the colours in {Path(path).name}, give it "
+                                    "a new name, then use Import skin….")
+
+    def _open_skins(self) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        from . import skins
+        d = skins.user_skin_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
+
     def save(self) -> None:
         s = self.lib.settings
         s.acoustid_api_key = self.acoustid.text().strip()
@@ -131,13 +208,7 @@ class SettingsDialog(QDialog):
         if self.updates.isChecked() and not s.check_for_updates:
             s.skipped_update = ""
         s.check_for_updates = self.updates.isChecked()
-        if self.theme.currentText() != s.theme:
-            from . import themes
-            s.theme = themes.apply(self.theme.currentText())
-            parent = self.parent()
-            if parent is not None and hasattr(parent, "theme_group"):
-                for a in parent.theme_group.actions():
-                    a.setChecked(a.text() == s.theme)
+        s.skin = self.skin.currentText()
         s.auto_apply_threshold = self.threshold.value()
         s.prefer_country = self.country.text().strip().upper()
         s.prefer_album_releases = self.prefer_album.isChecked()
@@ -310,7 +381,7 @@ class OrganizeDialog(QDialog):
         form.addRow("Pattern", self.pattern)
         help_ = QLabel(PATTERN_HELP)
         help_.setWordWrap(True)
-        help_.setStyleSheet("color: gray")
+        help_.setObjectName("dim")
         form.addRow("", help_)
         self.dest = QLineEdit(s.organize_destination or (lib.folders[0] if lib.folders else ""))
         form.addRow("Destination", _browse_row(self.dest, self))

@@ -114,6 +114,7 @@ def pyinstaller(tui: bool, fpcalc: Path | None) -> Path:
         "--distpath", str(DIST), "--workpath", str(ROOT / "build"), "--specpath", str(ROOT / "build"),
         "--collect-submodules", "musicmaid",
         "--add-data", f"{ROOT / 'musicmaid' / 'assets'}{sep}musicmaid/assets",
+        "--add-data", f"{ROOT / 'musicmaid' / 'skins'}{sep}musicmaid/skins",
         "--icon", str(PKG / ("icon.ico" if WIN else "icon-512.png")),
     ]
     for mod in EXCLUDES + (["PySide6"] if tui else ["textual"]):

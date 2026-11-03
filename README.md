@@ -34,8 +34,11 @@ It comes with three front-ends that share one engine:
   `{albumartist}/{album} ({year})/{disc_prefix}{tracknumber:02} - {title}`. File names are made safe for
   Windows and Linux, `.lrc`/`.cue` sidecars and folder art move along, empty folders are removed and
   folder-name casing is reused.
-* **Themes.** *System* follows your desktop's light or dark mode, or pick Light, Dark, Midnight, Graphite,
-  Forest or Rose under **View → Theme** or in **Settings**.
+* **Skins.** It uses the same skins as [Spindle](https://github.com/voidxzero/spindle): Modern Night (the
+  default on Linux), Amp Classic (the default on Windows), Luna Midnight, Olive Noir, Aqua Deck, Ice Blue,
+  Chrome Deck, Emerald Core, Classic 98 and Vapor Dusk, plus *System* for your desktop's own look. Choose one
+  under **View → Skin** or in **Settings**. Skins are small `.json` files with colours, not code, so they're safe
+  to share, and skin files work in both apps.
 * **Safe by default.** Automatic results become **proposals** that you review (see *Needs review*) before
   anything is written. Only matches above a confidence threshold (default 90%) are written automatically
   by *Auto-tag*. **Every** tag write, move and duplicate removal is journaled and can be **undone**.

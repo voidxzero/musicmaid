@@ -19,6 +19,14 @@ if "--self-test" in sys.argv:
         out.append(f"HTTPS/MusicBrainz: {data['name']}")
         out.append(f"fpcalc: {find_fpcalc() or 'NOT FOUND'}")
         out.append(f"tag formats: {len(tags.AUDIO_EXTENSIONS)}")
+        from musicmaid.gui import skins
+        bundled = sorted(skins.bundled_skin_dir().glob("*.json"))
+        out.append(f"skins: {len(skins.theme_names())} ({len(bundled)} from files)")
+        if not bundled or skins.skin_errors:
+            raise RuntimeError(f"skin files missing or broken: {skins.skin_errors}")
+        app = QApplication.instance() or QApplication([])
+        for name in skins.theme_names():
+            skins.apply(name)
     except Exception:
         ok = False
         out.append(traceback.format_exc())
