@@ -36,6 +36,13 @@ FPCALC = "fpcalc.exe" if WIN else "fpcalc"
 sys.path.insert(0, str(ROOT))
 from musicmaid import __version__  # noqa: E402
 
+# Windows consoles default to a legacy code page; never crash on output
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 # Other Qt bindings / heavy libraries that may be installed but are never used.
 EXCLUDES = ["PyQt5", "PyQt6", "tkinter", "matplotlib", "scipy", "pandas", "IPython", "pytest",
             "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.Qt3DCore", "PySide6.QtQuick",
@@ -79,7 +86,7 @@ def ensure_fpcalc() -> Path | None:
 
 
 def write_version_file() -> Path:
-    """Windows file properties (shown in Explorer → Properties → Details)."""
+    """Windows file properties (shown in Explorer -> Properties -> Details)."""
     nums = tuple(int(x) for x in (__version__.split(".") + ["0", "0", "0"])[:4])
     path = DIST.parent / "build" / "version_info.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -119,7 +126,7 @@ def pyinstaller(tui: bool, fpcalc: Path | None) -> Path:
         opts += ["--console", "--collect-all", "textual", str(PKG / "tui_entry.py")]
     else:
         opts += ["--windowed", str(PKG / "gui_entry.py")]
-    log(f"PyInstaller → dist/{name}")
+    log(f"PyInstaller -> dist/{name}")
     PyInstaller.__main__.run(opts)
     return DIST / name
 
@@ -155,7 +162,7 @@ def package_windows(app_dir: Path, installer: bool) -> list[Path]:
         if not iscc:
             print("WARNING: Inno Setup (iscc) not found - skipping Setup.exe. Get it from https://jrsoftware.org/isdl.php")
         else:
-            log("Inno Setup → Setup.exe")
+            log("Inno Setup -> Setup.exe")
             subprocess.run([iscc, f"/DAppVersion={__version__}", f"/DSourceDir={app_dir}",
                             f"/DOutputDir={RELEASE}", f"/DIconFile={PKG / 'icon.ico'}",
                             str(PKG / "musicmaid.iss")], check=True)
@@ -217,7 +224,7 @@ def make_appimage(app_dir: Path, arch: str) -> Path:
     desktop = (PKG / "musicmaid.desktop").read_text().replace("Icon=audio-x-generic", "Icon=musicmaid")
     (appdir / "musicmaid.desktop").write_text(desktop)
     out = RELEASE / f"MusicMaid-{__version__}-{arch}.AppImage"
-    log("appimagetool → AppImage")
+    log("appimagetool -> AppImage")
     env = dict(os.environ, ARCH=arch, APPIMAGE_EXTRACT_AND_RUN="1")  # works without FUSE (e.g. in CI)
     subprocess.run([str(tool), "--no-appstream", str(appdir), str(out)], check=True, env=env)
     return out

@@ -80,6 +80,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("value", nargs="?")
 
     args = ap.parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):  # tags can contain any character; legacy consoles can't
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     lib = Library()
     task = _task(args.quiet)
 
