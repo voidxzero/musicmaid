@@ -33,6 +33,7 @@ class Settings:
     library_folders: list[str] = field(default_factory=list)
     acoustid_api_key: str = ""
     fpcalc_path: str = ""  # empty = auto-detect
+    offer_fpcalc_download: bool = True  # ask at startup when fpcalc is missing
     # identification
     auto_apply_threshold: float = 0.90  # matches scoring at/above this are auto-accepted
     prefer_album_releases: bool = True

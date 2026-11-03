@@ -72,6 +72,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dest")
     p.add_argument("--copy", action="store_true")
     p.add_argument("--go", action="store_true", help="actually move files (default is a dry run)")
+    p = sub.add_parser("fpcalc", help="show fpcalc (Chromaprint) status, or download it")
+    p.add_argument("--check", action="store_true", help="only report where fpcalc is; don't download")
     sub.add_parser("history", help="list undoable operations")
     p = sub.add_parser("undo", help="undo an operation (default: the latest)")
     p.add_argument("batch", nargs="?")
@@ -165,6 +167,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Moved {n} files. Undo with: musicmaid-cli undo {batch}")
         else:
             print(f"\n{len(moves)} files would move. Add --go to do it.")
+    elif args.cmd == "fpcalc":
+        from .fingerprint import FingerprintError, download_fpcalc, find_fpcalc
+        current = find_fpcalc()
+        if current or args.check:
+            print(current or "fpcalc not found")
+            return 0 if current else 1
+        try:
+            path = download_fpcalc(task)
+        except FingerprintError as e:
+            _done()
+            print(e)
+            return 1
+        _done()
+        print(f"fpcalc installed: {path}")
     elif args.cmd == "history":
         import time
         for batch, label, ts, n in lib.history():

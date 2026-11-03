@@ -1,9 +1,15 @@
 """Chromaprint audio fingerprints via the ``fpcalc`` tool, plus raw-fingerprint comparison."""
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
+import platform
 import shutil
+import stat
+import tarfile
+import zipfile
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -11,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import load_settings
+from .config import data_dir, load_settings
 from .db import Database, Track
 from .progress import NULL_TASK, Task
 
@@ -22,17 +28,86 @@ class FingerprintError(Exception):
     pass
 
 
+# Official Chromaprint builds, pinned by SHA-256 so a tampered download is rejected.
+CHROMAPRINT_VERSION = "1.5.1"
+_DOWNLOADS = {
+    ("win32", "x86_64"): ("windows-x86_64.zip",
+                          "36b478e16aa69f757f376645db0d436073a42c0097b6bb2677109e7835b59bbc"),
+    ("linux", "x86_64"): ("linux-x86_64.tar.gz",
+                          "4d7433a7f778e5946d7225230681cbcd634e153316ecac87c538c33ac32387a5"),
+}
+_EXE = "fpcalc.exe" if sys.platform == "win32" else "fpcalc"
+
+
+def _download_key() -> tuple[str, str]:
+    machine = platform.machine().lower()
+    return sys.platform, "x86_64" if machine in ("amd64", "x86_64", "x64") else machine
+
+
+def can_download_fpcalc() -> bool:
+    return _download_key() in _DOWNLOADS
+
+
+def downloaded_fpcalc_path() -> Path:
+    return data_dir() / "bin" / _EXE
+
+
+def download_fpcalc(task: Task = NULL_TASK) -> str:
+    """Fetch fpcalc from Chromaprint's GitHub releases into the MusicMaid data folder."""
+    from . import net
+
+    entry = _DOWNLOADS.get(_download_key())
+    if not entry:
+        raise FingerprintError(f"No prebuilt fpcalc for {sys.platform}/{platform.machine()}; "
+                               "install Chromaprint with your package manager.")
+    suffix, sha256 = entry
+    url = (f"https://github.com/acoustid/chromaprint/releases/download/v{CHROMAPRINT_VERSION}/"
+           f"chromaprint-fpcalc-{CHROMAPRINT_VERSION}-{suffix}")
+    task.progress(0, 0, "Downloading fpcalc (Chromaprint)...")
+    try:
+        data = net.get_bytes(url, timeout=120)
+    except net.NetError as e:
+        raise FingerprintError(f"Could not download fpcalc: {e}") from e
+    if not data:
+        raise FingerprintError(f"Could not download fpcalc from {url}")
+    if hashlib.sha256(data).hexdigest() != sha256:
+        raise FingerprintError("Downloaded fpcalc failed its checksum check; not installed.")
+    try:
+        if suffix.endswith(".zip"):
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                name = next(m for m in z.namelist() if m.rsplit("/", 1)[-1] == _EXE)
+                binary = z.read(name)
+        else:
+            with tarfile.open(fileobj=io.BytesIO(data)) as t:
+                member = next(m for m in t.getmembers() if m.isfile() and m.name.rsplit("/", 1)[-1] == _EXE)
+                binary = t.extractfile(member).read()
+    except (StopIteration, zipfile.BadZipFile, tarfile.TarError) as e:
+        raise FingerprintError("The fpcalc download didn't contain the expected program.") from e
+    target = downloaded_fpcalc_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".part")
+    tmp.write_bytes(binary)
+    tmp.chmod(tmp.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    os.replace(tmp, target)
+    task.log(f"Installed fpcalc {CHROMAPRINT_VERSION} to {target}")
+    return str(target)
+
+
 def find_fpcalc() -> str | None:
     configured = load_settings().fpcalc_path
     if configured and Path(configured).is_file():
         return configured
-    exe = "fpcalc.exe" if sys.platform == "win32" else "fpcalc"
+    exe = _EXE
     # bundled next to the app (PyInstaller) or in ./vendor
     here = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
     for cand in (here / exe, here / "vendor" / exe, Path(sys.executable).parent / exe):
         if cand.is_file():
             return str(cand)
-    return shutil.which(exe)
+    found = shutil.which(exe)
+    if found:
+        return found
+    downloaded = downloaded_fpcalc_path()
+    return str(downloaded) if downloaded.is_file() else None
 
 
 def _run_fpcalc(path: str, raw: bool, length: int = 120) -> tuple[float, object]:

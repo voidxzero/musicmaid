@@ -16,7 +16,8 @@ from .. import APP_NAME, __version__
 from .. import tags as tagio
 from ..cleanup import problems
 from ..db import Track
-from ..fingerprint import find_fpcalc
+from ..config import save_settings
+from ..fingerprint import can_download_fpcalc, download_fpcalc, find_fpcalc
 from ..library import VIEWS, Library
 from .dialogs import ArtworkDialog, DuplicatesDialog, HistoryDialog, OrganizeDialog, SettingsDialog
 from .workers import TaskRunner
@@ -496,6 +497,7 @@ class MainWindow(QMainWindow):
         for a in (self.a_dupes, self.a_org, self.a_select_all, self.a_log):
             lib_menu.addAction(a)
         h = m.addMenu("&Help")
+        h.addAction(self._act("Download fpcalc (Chromaprint)…", self.get_fpcalc))
         h.addAction(self._act("About", self._about))
 
     def _restore_state(self) -> None:
@@ -522,13 +524,45 @@ class MainWindow(QMainWindow):
     def _first_run(self) -> None:
         if not find_fpcalc():
             self._log("fpcalc (Chromaprint) was not found: audio-based duplicate detection and AcoustID lookups are "
-                      "disabled. Install Chromaprint or set the fpcalc path in Settings.")
+                      "disabled. Use Help → Download fpcalc, install Chromaprint, or set the fpcalc path in Settings.")
             self.log_dock.show()
+            if can_download_fpcalc() and self.lib.settings.offer_fpcalc_download:
+                self._offer_fpcalc()
         if not self.lib.folders:
             QMessageBox.information(self, f"Welcome to {APP_NAME}",
                                     "Start by adding your music folder. Nothing is changed on disk until you apply "
                                     "changes, and every change can be undone.")
             self.add_folder()
+
+    def _offer_fpcalc(self) -> None:
+        box = QMessageBox(QMessageBox.Icon.Question, APP_NAME,
+                          "MusicMaid needs Chromaprint's small fpcalc program (about 3 MB) to recognise songs by "
+                          "their sound and to find duplicates that are encoded differently.\n\n"
+                          "Download it now from the official Chromaprint release on GitHub?", parent=self)
+        yes = box.addButton("Download", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Not now", QMessageBox.ButtonRole.RejectRole)
+        never = box.addButton("Don't ask again", QMessageBox.ButtonRole.DestructiveRole)
+        box.exec()
+        if box.clickedButton() is yes:
+            self.get_fpcalc()
+        elif box.clickedButton() is never:
+            self.lib.settings.offer_fpcalc_download = False
+            save_settings(self.lib.settings)
+
+    def get_fpcalc(self) -> None:
+        current = find_fpcalc()
+        if current and QMessageBox.question(self, APP_NAME, f"fpcalc is already available:\n{current}\n\n"
+                                            "Download a fresh copy anyway?") != QMessageBox.StandardButton.Yes:
+            return
+        if not can_download_fpcalc():
+            QMessageBox.information(self, APP_NAME, "There's no prebuilt fpcalc for this system. Install "
+                                    "Chromaprint with your package manager (e.g. chromaprint-tools).")
+            return
+
+        def done(path: str) -> None:
+            self._log(f"fpcalc ready: {path}")
+            self.status.setText("fpcalc installed: fingerprinting and AcoustID lookups are enabled")
+        self.run("Downloading fpcalc…", download_fpcalc, done)
 
     # ------------------------------------------------------------ helpers
     def run(self, label: str, fn, on_done=None) -> None:

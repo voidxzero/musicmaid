@@ -14,7 +14,8 @@ from textual.widgets import (
 from .. import APP_NAME, __version__
 from .. import tags as tagio
 from ..cleanup import problems
-from ..fingerprint import find_fpcalc
+from ..config import save_settings
+from ..fingerprint import can_download_fpcalc, download_fpcalc, find_fpcalc
 from ..library import VIEWS, Library
 from .screens import (
     ArtworkScreen, ConfirmScreen, DuplicatesScreen, EditScreen, FoldersScreen, HistoryScreen, OrganizeScreen,
@@ -140,7 +141,10 @@ class MusicMaidTUI(TaskMixin, App):
             self.call_after_refresh(self.action_folders)
         if not find_fpcalc():
             self.log_message("fpcalc (Chromaprint) not found: duplicate detection by audio and AcoustID are disabled. "
-                             "Install it with your package manager (e.g. 'dnf install chromaprint-tools').")
+                             "Install it with your package manager (e.g. 'dnf install chromaprint-tools') "
+                             "or run 'musicmaid-cli fpcalc' to download it.")
+            if can_download_fpcalc() and self.lib.settings.offer_fpcalc_download:
+                self.call_after_refresh(self._offer_fpcalc)
         if not self.lib.settings.acoustid_api_key:
             self.log_message("Tip: add a free AcoustID API key in Settings (,) to identify tracks by their audio.")
 
@@ -317,6 +321,20 @@ class MusicMaidTUI(TaskMixin, App):
             self.query_one("#status", Static).update(msg.format(r=result) if "{" in msg else msg)
             self.refresh_library()
         return done
+
+    def _offer_fpcalc(self) -> None:
+        def go(ok: bool | None) -> None:
+            if ok:
+                self.start_task("Downloading fpcalc…", download_fpcalc,
+                                lambda path: self.notify(f"fpcalc installed: {path}"))
+            else:
+                self.lib.settings.offer_fpcalc_download = False
+                save_settings(self.lib.settings)
+                self.log_message("OK, not asking again. Run 'musicmaid-cli fpcalc' any time to download it.")
+        self.push_screen(ConfirmScreen(
+            "fpcalc (Chromaprint, ~3 MB) is needed to recognise songs by their sound and to find duplicates "
+            "that are encoded differently.\n\nDownload it now from the official Chromaprint release on GitHub?",
+            "Download"), go)
 
     def action_scan(self) -> None:
         if not self.lib.folders:

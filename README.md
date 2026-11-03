@@ -52,6 +52,8 @@ python3 -m venv ~/.local/share/musicmaid-venv
 ~/.local/share/musicmaid-venv/bin/musicmaid-tui      # or: musicmaid (GUI)
 ```
 
+If you skip the package, MusicMaid offers to download `fpcalc` itself (x86_64), or run `musicmaid-cli fpcalc`.
+
 Optional menu entry: copy `packaging/musicmaid.desktop` to `~/.local/share/applications/`.
 
 ### Windows
@@ -61,8 +63,10 @@ py -m pip install "C:\path\to\musicmaid[gui]"
 musicmaid
 ```
 
-Download `fpcalc.exe` from <https://acoustid.org/chromaprint> and either put it on your `PATH` or set its
-location in **Settings**. Alternatively, build a self-contained app that bundles it (see below).
+On first start MusicMaid offers to download Chromaprint's `fpcalc.exe` (about 3 MB) from the official
+GitHub release. The download is checked against a pinned SHA-256 checksum and stored in the MusicMaid data
+folder. You can also do it later with **Help → Download fpcalc** or `musicmaid-cli fpcalc`, or point
+**Settings** at your own copy. The standalone apps below already include it.
 
 ### AcoustID key (recommended)
 
@@ -99,6 +103,7 @@ musicmaid-cli review                    # show pending proposals
 musicmaid-cli apply --min-score 0.8
 musicmaid-cli organize                  # dry run;  --go to move files
 musicmaid-cli history && musicmaid-cli undo
+musicmaid-cli fpcalc                    # download fpcalc if it's missing  (--check: just show where it is)
 ```
 
 ## Standalone apps (no Python needed)
