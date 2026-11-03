@@ -1,0 +1,31 @@
+name: Build Linux
+
+# Manual run: Actions tab -> "Build Linux" -> Run workflow.
+# Pushing a tag like v0.2.0 also attaches the tarball + AppImage to that GitHub release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  build:
+    needs: tests
+    # oldest supported runner -> binaries also run on older distros (glibc compatibility)
+    runs-on: ubuntu-22.04
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: sudo apt-get update && sudo apt-get install -y libxcb-cursor0 libxkbcommon-x11-0 libegl1 libfuse2
+      - run: pip install ".[gui]" pyinstaller
+      - run: python packaging/build.py --appimage
+      - run: QT_QPA_PLATFORM=offscreen dist/MusicMaid/MusicMaid --self-test
+      - uses: actions/upload-artifact@v4
+        with: { name: MusicMaid-linux, path: release/* }
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with: { files: release/* }

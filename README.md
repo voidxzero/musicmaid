@@ -112,9 +112,19 @@ Both bundle Python, Qt and Chromaprint's `fpcalc`, and finish with a self-test o
 (`MusicMaid --self-test`). On Linux, unpack the tarball and run `./MusicMaid`; run `./install.sh` once to
 add it to your application menu.
 
-**Without a Windows PC:** push the project to GitHub. `.github/workflows/build.yml` runs the tests and
-builds the Windows zip and installer, plus the Linux tarball and AppImage. Start it manually from the
-*Actions* tab, or push a tag such as `v0.1.0` to publish everything as a GitHub release.
+**Without a Windows PC:** push the project to GitHub and use GitHub Actions:
+
+| Workflow | Runs when | What it does |
+|----------|-----------|--------------|
+| `Tests` | every push to `main` and every pull request | runs the test suite |
+| `Build Windows` | manual run, or a `v*` tag | tests, then builds the zip and installer and self-tests the `.exe` |
+| `Build Linux` | manual run, or a `v*` tag | tests, then builds the tarball and AppImage and self-tests the binary |
+
+Start a build from the *Actions* tab (pick the workflow, then *Run workflow*) and download the result
+under *Artifacts*. Pushing a tag such as `v0.2.0` runs both builds and attaches all files to that GitHub
+release.
+
+Issues use the labels `windows`, `linux`, `gui`, `tui` and `packaging`, defined in `.github/labels.json`.
 
 ## Data locations
 

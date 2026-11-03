@@ -1,0 +1,7 @@
+[
+  {"name": "windows", "color": "0078D6", "description": "Only affects Windows"},
+  {"name": "linux", "color": "F7C600", "description": "Only affects Linux"},
+  {"name": "gui", "color": "5319E7", "description": "Desktop GUI"},
+  {"name": "tui", "color": "1D76DB", "description": "Terminal UI"},
+  {"name": "packaging", "color": "C5DEF5", "description": "Builds, installers, CI"}
+]
