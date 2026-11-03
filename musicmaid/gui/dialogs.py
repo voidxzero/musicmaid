@@ -7,12 +7,12 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
     QSpinBox, QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from .. import net
+from .. import APP_NAME, net
 from ..config import save_settings
 from ..library import Library
 from ..organizer import PATTERN_HELP
@@ -51,14 +51,10 @@ class SettingsDialog(QDialog):
 
         self.acoustid = QLineEdit(s.acoustid_api_key)
         self.acoustid.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
-        from ..config import BUILTIN_ACOUSTID_KEY
-        if BUILTIN_ACOUSTID_KEY:
-            self.acoustid.setPlaceholderText("optional: MusicMaid's built-in key is used")
-            link = QLabel("Identifies songs by their sound. Works out of the box; only enter a key here if you "
-                          'have <a href="https://acoustid.org/new-application">your own AcoustID key</a>.')
-        else:
-            link = QLabel('<a href="https://acoustid.org/new-application">Get a free AcoustID API key</a> '
-                          "— lets MusicMaid identify songs by their sound, even with no tags at all.")
+        self.acoustid.setPlaceholderText("optional")
+        link = QLabel('Optional. <a href="https://acoustid.org/new-application">Get a free AcoustID key</a> '
+                      "to identify songs by their sound, even with no tags at all. Without one, MusicMaid "
+                      "uses tags and file names.")
         link.setOpenExternalLinks(True)
         link.setWordWrap(True)
         form.addRow("AcoustID API key", self.acoustid)
@@ -558,3 +554,81 @@ class ArtworkDialog(QDialog):
         if p:
             self.result = (Path(p).read_bytes(), f"file {Path(p).name}")
             self.accept()
+
+
+# ---------------------------------------------------------------- AcoustID key
+class AcoustIDDialog(QDialog):
+    """Explains MusicMaid with and without AcoustID, and takes (and checks) the user's own key."""
+
+    def __init__(self, lib: Library, parent=None, first_run: bool = False):
+        from ..guidance import (ACOUSTID_INTRO, ACOUSTID_PRIVACY, ACOUSTID_SIGNUP, ACOUSTID_WITH,
+                                ACOUSTID_WITHOUT)
+        super().__init__(parent)
+        self.lib = lib
+        self.never = False
+        self.setWindowTitle("Identify songs by their sound (optional)")
+        self.setMinimumWidth(560)
+        lay = QVBoxLayout(self)
+        intro = QLabel(ACOUSTID_INTRO.replace(ACOUSTID_SIGNUP, f'<a href="{ACOUSTID_SIGNUP}">acoustid.org</a>'))
+        for text in (intro, QLabel(f"<b>{ACOUSTID_WITH.split(':', 1)[0]}:</b>{ACOUSTID_WITH.split(':', 1)[1]}"),
+                     QLabel(f"<b>{ACOUSTID_WITHOUT.split(':', 1)[0]}:</b>{ACOUSTID_WITHOUT.split(':', 1)[1]}"),
+                     QLabel(f"<small>{ACOUSTID_PRIVACY}</small>")):
+            text.setWordWrap(True)
+            text.setOpenExternalLinks(True)
+            lay.addWidget(text)
+        row = QHBoxLayout()
+        self.key = QLineEdit(lib.settings.acoustid_api_key)
+        self.key.setPlaceholderText("Paste your AcoustID API key here")
+        row.addWidget(QLabel("API key"))
+        row.addWidget(self.key, 1)
+        lay.addLayout(row)
+        self.result = QLabel("")
+        self.result.setWordWrap(True)
+        lay.addWidget(self.result)
+        buttons = QDialogButtonBox()
+        self.save_btn = buttons.addButton("Check and Save", QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton("Continue without a key" if first_run else "Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+        if first_run:
+            never = buttons.addButton("Don't ask again", QDialogButtonBox.ButtonRole.DestructiveRole)
+            never.clicked.connect(self._never)
+        elif lib.settings.acoustid_api_key:
+            remove = buttons.addButton("Remove Key", QDialogButtonBox.ButtonRole.DestructiveRole)
+            remove.clicked.connect(self._remove)
+        self.save_btn.clicked.connect(self.save)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def save(self) -> None:
+        from ..providers.acoustid import check_key
+        key = self.key.text().strip()
+        if not key:
+            self.result.setText("Paste a key first, or continue without one.")
+            return
+        self.result.setText("Checking the key with AcoustID…")
+        self.setEnabled(False)
+        QApplication.processEvents()
+        ok = check_key(key)
+        self.setEnabled(True)
+        if ok is False:
+            self.result.setText("<span style='color:#da3633'>AcoustID didn't accept this key. Check that you "
+                                "copied the <b>API key</b> of your application.</span>")
+            return
+        s = self.lib.settings
+        s.acoustid_api_key = key
+        s.offer_acoustid_key = False
+        save_settings(s)
+        if ok is None:
+            QMessageBox.information(self, APP_NAME, "Saved. The key couldn't be checked right now (no connection?), "
+                                    "it will be used once AcoustID is reachable.")
+        self.accept()
+
+    def _never(self) -> None:
+        self.lib.settings.offer_acoustid_key = False
+        save_settings(self.lib.settings)
+        self.never = True
+        self.reject()
+
+    def _remove(self) -> None:
+        self.lib.settings.acoustid_api_key = ""
+        save_settings(self.lib.settings)
+        self.accept()

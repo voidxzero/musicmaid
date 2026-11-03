@@ -237,6 +237,13 @@ def main(argv: list[str] | None = None) -> int:
                     val = float(val)
                 elif isinstance(cur, list):
                     val = [v.strip() for v in val.split(",") if v.strip()]
+                if args.key == "acoustid_api_key" and val:
+                    from .providers.acoustid import check_key
+                    ok = check_key(val)
+                    if ok is False:
+                        print("AcoustID didn't accept this key; not saved. Get one at https://acoustid.org/new-application")
+                        return 1
+                    print("AcoustID key saved" + ("." if ok else " (couldn't verify it right now)."))
                 setattr(s, args.key, val)
                 save_settings(s)
     return 0

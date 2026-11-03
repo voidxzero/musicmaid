@@ -19,7 +19,7 @@ from ..db import Track
 from ..config import save_settings
 from ..fingerprint import can_download_fpcalc, download_fpcalc, find_fpcalc
 from ..library import VIEWS, Library
-from .dialogs import ArtworkDialog, DuplicatesDialog, HistoryDialog, OrganizeDialog, SettingsDialog
+from .dialogs import AcoustIDDialog, ArtworkDialog, DuplicatesDialog, HistoryDialog, OrganizeDialog, SettingsDialog
 from .. import updater
 from . import themes
 from .workers import TaskRunner, background
@@ -510,6 +510,7 @@ class MainWindow(QMainWindow):
             theme_menu.addAction(a)
         h = m.addMenu("&Help")
         h.addAction(self._act("Check for Updates…", lambda: self.check_updates(manual=True)))
+        h.addAction(self._act("Identify by Sound (AcoustID Key)…", lambda: self.acoustid_key(first_run=False)))
         h.addAction(self._act("Download fpcalc (Chromaprint)…", self.get_fpcalc))
         h.addAction(self._act("About", self._about))
 
@@ -544,11 +545,27 @@ class MainWindow(QMainWindow):
             self.log_dock.show()
             if can_download_fpcalc() and self.lib.settings.offer_fpcalc_download:
                 self._offer_fpcalc()
+        if not self.lib.settings.acoustid_key and self.lib.settings.offer_acoustid_key:
+            self.acoustid_key(first_run=True)
+        if not self.lib.settings.acoustid_key:
+            self._log("No AcoustID key: songs are identified from tags and file names only. Add a free key with "
+                      "Help → Identify by Sound to recognise untagged or wrongly tagged files.")
         if not self.lib.folders:
             QMessageBox.information(self, f"Welcome to {APP_NAME}",
                                     "Start by adding your music folder. Nothing is changed on disk until you apply "
                                     "changes, and every change can be undone.")
             self.add_folder()
+
+    def acoustid_key(self, first_run: bool) -> None:
+        had = bool(self.lib.settings.acoustid_key)
+        AcoustIDDialog(self.lib, self, first_run=first_run).exec()
+        has = bool(self.lib.settings.acoustid_key)
+        if has and not had:
+            self._log("AcoustID key saved: songs will also be identified by their sound.")
+            if not find_fpcalc():
+                self._log("Note: identifying by sound also needs fpcalc (Help → Download fpcalc).")
+        elif had and not has:
+            self._log("AcoustID key removed: songs are identified from tags and file names only.")
 
     def set_theme(self, name: str) -> None:
         self.lib.settings.theme = themes.apply(name)

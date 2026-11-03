@@ -19,8 +19,8 @@ from ..fingerprint import can_download_fpcalc, download_fpcalc, find_fpcalc
 from .. import updater
 from ..library import VIEWS, Library
 from .screens import (
-    ArtworkScreen, ConfirmScreen, DuplicatesScreen, EditScreen, FoldersScreen, HistoryScreen, OrganizeScreen,
-    SettingsScreen, TaskMixin,
+    ArtworkScreen, ConfirmScreen, DuplicatesScreen, EditScreen, FoldersScreen, HistoryScreen, InputScreen,
+    OrganizeScreen, SettingsScreen, TaskMixin,
 )
 
 CSS = """
@@ -149,7 +149,10 @@ class MusicMaidTUI(TaskMixin, App):
         if self.lib.settings.check_for_updates:
             self._check_updates()
         if not self.lib.settings.acoustid_key:
-            self.log_message("Tip: add a free AcoustID API key in Settings (,) to identify tracks by their audio.")
+            self.log_message("No AcoustID key: songs are identified from tags and file names only. Add a free key "
+                             "in Settings (,) to also recognise untagged or wrongly tagged files by their sound.")
+            if self.lib.settings.offer_acoustid_key:
+                self.call_after_refresh(self._offer_acoustid)
 
     # ------------------------------------------------------------ data
     def refresh_library(self) -> None:
@@ -356,6 +359,42 @@ class MusicMaidTUI(TaskMixin, App):
         self.push_screen(ConfirmScreen(f"MusicMaid {upd.version} is available (you have {__version__}).\n\n"
                                        f"{upd.notes[:600]}\n\nInstall it now? Cancel skips this version.",
                                        "Install"), go)
+
+    def _offer_acoustid(self) -> None:
+        from ..guidance import ACOUSTID_INTRO, ACOUSTID_PRIVACY, ACOUSTID_WITH, ACOUSTID_WITHOUT
+
+        def got_key(key: str | None) -> None:
+            if key and key.strip():
+                self._check_acoustid_key(key.strip())
+
+        def go(ok: bool | None) -> None:
+            if ok:
+                self.push_screen(InputScreen("AcoustID API key", "", "paste the API key of your application"),
+                                 got_key)
+            else:
+                self.lib.settings.offer_acoustid_key = False
+                save_settings(self.lib.settings)
+                self.log_message("Continuing without AcoustID. You can add a key any time in Settings (,).")
+        self.push_screen(ConfirmScreen("\n\n".join([ACOUSTID_INTRO, ACOUSTID_WITH, ACOUSTID_WITHOUT,
+                                                     ACOUSTID_PRIVACY + " Cancel continues without a key."]),
+                                       "Add a key"), go)
+
+    @work(thread=True, exclusive=True, group="acoustid")
+    def _check_acoustid_key(self, key: str) -> None:
+        from ..providers.acoustid import check_key
+        ok = check_key(key)
+        self.call_from_thread(self._acoustid_checked, key, ok)
+
+    def _acoustid_checked(self, key: str, ok: bool | None) -> None:
+        if ok is False:
+            self.notify("AcoustID didn't accept that key. Check you copied the API key.", severity="error")
+            self._offer_acoustid()
+            return
+        s = self.lib.settings
+        s.acoustid_api_key, s.offer_acoustid_key = key, False
+        save_settings(s)
+        self.notify("AcoustID key saved: songs will also be identified by their sound."
+                    + ("" if ok else " (Couldn't verify it right now.)"))
 
     def _offer_fpcalc(self) -> None:
         def go(ok: bool | None) -> None:

@@ -25,10 +25,6 @@ def data_dir() -> Path:
     return p
 
 
-# MusicMaid's own AcoustID *application* key. AcoustID issues one per application, not per user; like
-# Picard, MusicMaid ships it so fingerprint lookups work out of the box. A key in Settings overrides it.
-BUILTIN_ACOUSTID_KEY = ""
-
 DEFAULT_PATTERN = "{albumartist}/{album} ({year})/{disc_prefix}{tracknumber:02} - {title}"
 
 
@@ -38,6 +34,7 @@ class Settings:
     acoustid_api_key: str = ""
     fpcalc_path: str = ""  # empty = auto-detect
     offer_fpcalc_download: bool = True  # ask at startup when fpcalc is missing
+    offer_acoustid_key: bool = True  # ask at startup when no AcoustID key is set
     theme: str = "System"  # GUI colour theme (see gui/themes.py)
     check_for_updates: bool = True  # look for a new release on GitHub at startup
     skipped_update: str = ""  # version the user chose to skip
@@ -64,7 +61,7 @@ class Settings:
 
     @property
     def acoustid_key(self) -> str:
-        return self.acoustid_api_key.strip() or BUILTIN_ACOUSTID_KEY
+        return self.acoustid_api_key.strip()
 
     @property
     def quarantine_path(self) -> Path:

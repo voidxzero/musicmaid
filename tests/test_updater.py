@@ -173,3 +173,26 @@ def test_clean_env_strips_bundle_vars(monkeypatch):
     assert env["LD_LIBRARY_PATH"] == "/usr/local/lib"
     assert "_PYI_APPLICATION_HOME_DIR" not in env and "APPIMAGE" not in env
     assert env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+
+
+def test_acoustid_check_key(monkeypatch):
+    from musicmaid import net
+    from musicmaid.providers import acoustid
+
+    class R:
+        def __init__(self, data):
+            self.data = data
+
+        def json(self):
+            return self.data
+    replies = {"bad": {"status": "error", "error": {"code": 4, "message": "invalid API key"}},
+               "good": {"status": "error", "error": {"code": 3, "message": "invalid fingerprint"}}}
+    monkeypatch.setattr(net, "get", lambda url, data=None, **kw: R(replies[data["client"]]))
+    assert acoustid.check_key("bad") is False
+    assert acoustid.check_key("good") is True
+    assert acoustid.check_key("  ") is False
+
+    def offline(*a, **k):
+        raise net.NetError("offline")
+    monkeypatch.setattr(net, "get", offline)
+    assert acoustid.check_key("good") is None

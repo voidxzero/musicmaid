@@ -32,3 +32,21 @@ def lookup(api_key: str, fingerprint: str, duration: float) -> list[dict]:
         msg = (data.get("error") or {}).get("message", "unknown error")
         raise AcoustIDError(f"AcoustID: {msg}")
     return data.get("results", [])
+
+
+def check_key(api_key: str) -> bool | None:
+    """True if AcoustID accepts the key, False if it rejects it, None if we couldn't tell (offline)."""
+    if not api_key.strip():
+        return False
+    try:
+        r = net.get(URL, data={"client": api_key.strip(), "duration": "200", "fingerprint": "AQAAAA",
+                               "format": "json"}, retries=1)
+        data = r.json()
+    except (net.NetError, ValueError):
+        return None
+    err = data.get("error") or {}
+    if err.get("code") == 4 or "invalid api key" in str(err.get("message", "")).lower():
+        return False
+    if err.get("code") == 2:  # missing parameter: shouldn't happen, can't judge
+        return None
+    return True
