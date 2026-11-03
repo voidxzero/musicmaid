@@ -20,7 +20,8 @@ from ..config import save_settings
 from ..fingerprint import can_download_fpcalc, download_fpcalc, find_fpcalc
 from ..library import VIEWS, Library
 from .dialogs import ArtworkDialog, DuplicatesDialog, HistoryDialog, OrganizeDialog, SettingsDialog
-from .workers import TaskRunner
+from .. import updater
+from .workers import TaskRunner, background
 
 COLUMNS = [
     ("state", ""), ("artist", "Artist"), ("title", "Title"), ("album", "Album"), ("albumartist", "Album Artist"),
@@ -497,6 +498,7 @@ class MainWindow(QMainWindow):
         for a in (self.a_dupes, self.a_org, self.a_select_all, self.a_log):
             lib_menu.addAction(a)
         h = m.addMenu("&Help")
+        h.addAction(self._act("Check for Updates…", lambda: self.check_updates(manual=True)))
         h.addAction(self._act("Download fpcalc (Chromaprint)…", self.get_fpcalc))
         h.addAction(self._act("About", self._about))
 
@@ -522,6 +524,9 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
     def _first_run(self) -> None:
+        updater.cleanup_previous()
+        if self.lib.settings.check_for_updates:
+            self.check_updates(manual=False)
         if not find_fpcalc():
             self._log("fpcalc (Chromaprint) was not found: audio-based duplicate detection and AcoustID lookups are "
                       "disabled. Use Help → Download fpcalc, install Chromaprint, or set the fpcalc path in Settings.")
@@ -533,6 +538,63 @@ class MainWindow(QMainWindow):
                                     "Start by adding your music folder. Nothing is changed on disk until you apply "
                                     "changes, and every change can be undone.")
             self.add_folder()
+
+    # ------------------------------------------------------------ updates
+    def check_updates(self, manual: bool) -> None:
+        def done(upd, error) -> None:
+            if error:
+                self._log(f"Update check failed: {error}")
+                if manual:
+                    QMessageBox.warning(self, APP_NAME, f"Couldn't check for updates:\n{error}")
+            elif upd is None:
+                if manual:
+                    QMessageBox.information(self, APP_NAME, f"You're running the latest version ({__version__}).")
+            elif manual or upd.version != self.lib.settings.skipped_update:
+                self._offer_update(upd)
+        if manual:
+            self.status.setText("Checking for updates…")
+        background(updater.check, done)
+
+    def _offer_update(self, upd: "updater.Update") -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        box = QMessageBox(QMessageBox.Icon.Information, f"{APP_NAME} update",
+                          f"<b>{APP_NAME} {upd.version}</b> is available. You have {__version__}.", parent=self)
+        if upd.notes:
+            box.setDetailedText(upd.notes)
+        if upd.can_install:
+            size = f" ({upd.size / 1e6:.0f} MB)" if upd.size else ""
+            box.setInformativeText(f"Install it now{size}? {APP_NAME} will restart. Your library and settings are kept.")
+            go = box.addButton("Install and Restart", QMessageBox.ButtonRole.AcceptRole)
+        else:
+            box.setInformativeText("This copy can't update itself (it runs from Python). Get the new version "
+                                   "from the download page, or update with pip or git.")
+            go = box.addButton("Open Download Page", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        skip = box.addButton("Skip This Version", QMessageBox.ButtonRole.DestructiveRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is skip:
+            self.lib.settings.skipped_update = upd.version
+            save_settings(self.lib.settings)
+        elif clicked is go and not upd.can_install:
+            QDesktopServices.openUrl(QUrl(upd.page))
+        elif clicked is go:
+            if self.runner.busy:
+                QMessageBox.information(self, APP_NAME, "Please wait for the current task to finish (or cancel "
+                                        "it), then choose Help → Check for Updates.")
+                return
+
+            def installed(msg: str) -> None:
+                self._log(msg)
+                self.close()
+
+            def failed(err: str) -> None:
+                QMessageBox.warning(self, APP_NAME, f"The update wasn't installed:\n{err}\n\n"
+                                    f"You can download it from {upd.page}")
+            self.runner.run(f"Downloading {APP_NAME} {upd.version}…", lambda task: updater.install(upd, task),
+                            installed, failed)
 
     def _offer_fpcalc(self) -> None:
         box = QMessageBox(QMessageBox.Icon.Question, APP_NAME,

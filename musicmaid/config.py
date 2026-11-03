@@ -34,6 +34,8 @@ class Settings:
     acoustid_api_key: str = ""
     fpcalc_path: str = ""  # empty = auto-detect
     offer_fpcalc_download: bool = True  # ask at startup when fpcalc is missing
+    check_for_updates: bool = True  # look for a new release on GitHub at startup
+    skipped_update: str = ""  # version the user chose to skip
     # identification
     auto_apply_threshold: float = 0.90  # matches scoring at/above this are auto-accepted
     prefer_album_releases: bool = True

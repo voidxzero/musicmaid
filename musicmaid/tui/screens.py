@@ -137,6 +137,7 @@ _SETTINGS_BOOLS = [
     ("save_cover_jpg", "Also save cover.jpg in album folders"),
     ("use_recycle_bin", "Send removed duplicates to the recycle bin instead of quarantine"),
     ("organize_copy", "Organize copies instead of moving"),
+    ("check_for_updates", "Check for updates at startup"),
 ]
 
 

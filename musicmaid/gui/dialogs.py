@@ -106,6 +106,9 @@ class SettingsDialog(QDialog):
         form.addRow("", self.recycle)
         self.va = QLineEdit(s.various_artists_name)
         form.addRow("Various artists name", self.va)
+        self.updates = QCheckBox("Check for updates when MusicMaid starts")
+        self.updates.setChecked(s.check_for_updates)
+        form.addRow("", self.updates)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.save)
@@ -118,6 +121,9 @@ class SettingsDialog(QDialog):
         s = self.lib.settings
         s.acoustid_api_key = self.acoustid.text().strip()
         s.fpcalc_path = self.fpcalc.text().strip()
+        if self.updates.isChecked() and not s.check_for_updates:
+            s.skipped_update = ""
+        s.check_for_updates = self.updates.isChecked()
         s.auto_apply_threshold = self.threshold.value()
         s.prefer_country = self.country.text().strip().upper()
         s.prefer_album_releases = self.prefer_album.isChecked()

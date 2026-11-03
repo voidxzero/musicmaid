@@ -103,6 +103,7 @@ musicmaid-cli review                    # show pending proposals
 musicmaid-cli apply --min-score 0.8
 musicmaid-cli organize                  # dry run;  --go to move files
 musicmaid-cli history && musicmaid-cli undo
+musicmaid-cli update                    # install a newer release  (--check: only check)
 musicmaid-cli fpcalc                    # download fpcalc if it's missing  (--check: just show where it is)
 ```
 
@@ -130,6 +131,23 @@ under *Artifacts*. Pushing a tag such as `v0.2.0` runs both builds and attaches 
 release.
 
 Issues use the labels `windows`, `linux`, `gui`, `tui` and `packaging`, defined in `.github/labels.json`.
+
+## Updates
+
+MusicMaid checks [GitHub releases](https://github.com/voidxzero/musicmaid/releases) at startup; turn this off in
+**Settings**, or use **Help → Check for Updates** (`musicmaid-cli update` from a terminal). When a new version
+is available you can install it from the app, or skip that version:
+
+| Installed from | How the update is installed |
+|----------------|-----------------------------|
+| Windows `setup.exe` | the new installer runs silently, then MusicMaid restarts |
+| Windows portable zip | the new files are copied over the folder after MusicMaid closes, then it restarts |
+| AppImage | the AppImage file is replaced and MusicMaid restarts |
+| Linux tarball | the app folder is swapped for the new one and MusicMaid restarts |
+| pip / git (source) | you're notified; update with `pip install -U` or `git pull` |
+
+Downloads are checked against the SHA-256 checksum GitHub publishes for each release file before anything is
+installed. Your library, settings and undo history live in the data folder and aren't touched.
 
 ## Data locations
 

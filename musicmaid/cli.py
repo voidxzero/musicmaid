@@ -74,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--go", action="store_true", help="actually move files (default is a dry run)")
     p = sub.add_parser("fpcalc", help="show fpcalc (Chromaprint) status, or download it")
     p.add_argument("--check", action="store_true", help="only report where fpcalc is; don't download")
+    p = sub.add_parser("update", help="check for a new MusicMaid release and install it")
+    p.add_argument("--check", action="store_true", help="only check; don't install")
     sub.add_parser("history", help="list undoable operations")
     p = sub.add_parser("undo", help="undo an operation (default: the latest)")
     p.add_argument("batch", nargs="?")
@@ -181,6 +183,30 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         _done()
         print(f"fpcalc installed: {path}")
+    elif args.cmd == "update":
+        from . import __version__, updater
+        try:
+            upd = updater.check()
+        except updater.UpdateError as e:
+            print(e)
+            return 1
+        if not upd:
+            print(f"MusicMaid {__version__} is the latest version.")
+            return 0
+        print(f"MusicMaid {upd.version} is available (you have {__version__}): {upd.page}")
+        if args.check:
+            return 0
+        if not upd.can_install:
+            print("This copy runs from Python. Update it with pip (pip install -U <path or git URL>) or git pull.")
+            return 0
+        try:
+            msg = updater.install(upd, task, relaunch=False)
+        except updater.UpdateError as e:
+            _done()
+            print(e)
+            return 1
+        _done()
+        print(msg)
     elif args.cmd == "history":
         import time
         for batch, label, ts, n in lib.history():

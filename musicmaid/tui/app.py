@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from rich.table import Table
 from rich.text import Text
-from textual import on
+from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -16,6 +16,7 @@ from .. import tags as tagio
 from ..cleanup import problems
 from ..config import save_settings
 from ..fingerprint import can_download_fpcalc, download_fpcalc, find_fpcalc
+from .. import updater
 from ..library import VIEWS, Library
 from .screens import (
     ArtworkScreen, ConfirmScreen, DuplicatesScreen, EditScreen, FoldersScreen, HistoryScreen, OrganizeScreen,
@@ -145,6 +146,8 @@ class MusicMaidTUI(TaskMixin, App):
                              "or run 'musicmaid-cli fpcalc' to download it.")
             if can_download_fpcalc() and self.lib.settings.offer_fpcalc_download:
                 self.call_after_refresh(self._offer_fpcalc)
+        if self.lib.settings.check_for_updates:
+            self._check_updates()
         if not self.lib.settings.acoustid_api_key:
             self.log_message("Tip: add a free AcoustID API key in Settings (,) to identify tracks by their audio.")
 
@@ -321,6 +324,38 @@ class MusicMaidTUI(TaskMixin, App):
             self.query_one("#status", Static).update(msg.format(r=result) if "{" in msg else msg)
             self.refresh_library()
         return done
+
+    @work(thread=True, exclusive=True, group="updates")
+    def _check_updates(self) -> None:
+        updater.cleanup_previous()
+        try:
+            upd = updater.check()
+        except updater.UpdateError as e:
+            self.call_from_thread(self.log_message, f"Update check failed: {e}")
+            return
+        if upd and upd.version != self.lib.settings.skipped_update:
+            self.call_from_thread(self._offer_update, upd)
+
+    def _offer_update(self, upd) -> None:
+        if not upd.can_install:
+            self.log_message(f"MusicMaid {upd.version} is available (you have {__version__}): {upd.page}")
+            self.notify(f"MusicMaid {upd.version} is available. See the log (l) for details.", timeout=8)
+            return
+
+        def go(ok: bool | None) -> None:
+            if not ok:
+                self.lib.settings.skipped_update = upd.version
+                save_settings(self.lib.settings)
+                self.log_message(f"Skipping {upd.version}. Run 'musicmaid-cli update' to install it later.")
+                return
+
+            def done(msg: str) -> None:
+                self.exit(message=f"{msg} Start MusicMaid again to use it.")
+            self.start_task(f"Downloading MusicMaid {upd.version}…",
+                            lambda task: updater.install(upd, task, relaunch=False), done)
+        self.push_screen(ConfirmScreen(f"MusicMaid {upd.version} is available (you have {__version__}).\n\n"
+                                       f"{upd.notes[:600]}\n\nInstall it now? Cancel skips this version.",
+                                       "Install"), go)
 
     def _offer_fpcalc(self) -> None:
         def go(ok: bool | None) -> None:

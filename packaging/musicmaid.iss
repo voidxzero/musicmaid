@@ -38,3 +38,16 @@ Name: "{autodesktop}\MusicMaid"; Filename: "{app}\MusicMaid.exe"; Tasks: desktop
 
 [Run]
 Filename: "{app}\MusicMaid.exe"; Description: "{cm:LaunchProgram,MusicMaid}"; Flags: nowait postinstall skipifsilent
+; in-app updates run this installer with /SILENT /RELAUNCH
+Filename: "{app}\MusicMaid.exe"; Flags: nowait runasoriginaluser; Check: RelaunchAfterUpdate
+
+[Code]
+function RelaunchAfterUpdate: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), '/RELAUNCH') = 0 then
+      Result := True;
+end;

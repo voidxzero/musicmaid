@@ -33,6 +33,39 @@ class _Job(QRunnable):
             self.signals.finished.emit(result)
 
 
+class _BgSignals(QObject):
+    done = Signal(object, object)  # result, error
+
+
+class _BgJob(QRunnable):
+    def __init__(self, fn, sig: _BgSignals):
+        super().__init__()
+        self.fn, self.sig = fn, sig
+
+    def run(self) -> None:
+        try:
+            result = self.fn()
+        except Exception as e:
+            self.sig.done.emit(None, e)
+        else:
+            self.sig.done.emit(result, None)
+
+
+_bg_alive: set = set()
+
+
+def background(fn, callback) -> None:
+    """Run fn() off the UI thread, separate from TaskRunner; callback(result, error) runs on the UI thread."""
+    sig = _BgSignals()
+    _bg_alive.add(sig)
+
+    def finish(result, error):
+        _bg_alive.discard(sig)
+        callback(result, error)
+    sig.done.connect(finish)
+    QThreadPool.globalInstance().start(_BgJob(fn, sig))
+
+
 class TaskRunner(QObject):
     """One long-running job at a time (keeps rate limits and the DB simple)."""
 
