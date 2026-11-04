@@ -196,3 +196,20 @@ def test_acoustid_check_key(monkeypatch):
         raise net.NetError("offline")
     monkeypatch.setattr(net, "get", offline)
     assert acoustid.check_key("good") is None
+
+
+def test_empty_xdg_data_home_is_ignored(monkeypatch, tmp_path):
+    from musicmaid import config
+    monkeypatch.delenv("MUSICMAID_HOME", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", "")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert config.data_dir() == tmp_path / ".local" / "share" / "musicmaid"
+    assert updater.install_prefix() == tmp_path / ".local" / "share" / "musicmaid"
+
+
+def test_linux_install_update_uses_release_source(fake_net):
+    fake_net[updater.LATEST_API] = FakeResp(json_data=release("9.0.0", {"MusicMaid-9.0.0-setup.exe": b"x"}))
+    upd = updater.check(kind="linux-install")
+    assert upd.can_install and not upd.sha256
+    assert upd.asset_url == "https://codeload.github.com/voidxzero/musicmaid/tar.gz/refs/tags/v9.0.0"

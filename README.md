@@ -50,16 +50,23 @@ Tags use MusicBrainz Picard's field naming, so other taggers and players read th
 
 ### Linux
 
-```bash
-sudo dnf install chromaprint-tools      # Fedora   (Debian/Ubuntu: sudo apt install libchromaprint-tools)
-python3 -m venv ~/.local/share/musicmaid-venv
-~/.local/share/musicmaid-venv/bin/pip install "/path/to/musicmaid[all]"
-~/.local/share/musicmaid-venv/bin/musicmaid-tui      # or: musicmaid (GUI)
+```sh
+git clone https://github.com/voidxzero/musicmaid.git
+cd musicmaid
+./install.sh
 ```
 
-If you skip the package, MusicMaid offers to download `fpcalc` itself (x86_64), or run `musicmaid-cli fpcalc`.
+The installer uses your package manager (apt, dnf, pacman or zypper) to install Chromaprint's `fpcalc`
+and whatever Python libraries your distribution provides, sets up a private Python environment in
+`~/.local/share/musicmaid`, and adds **MusicMaid** to your application menu. It also adds the commands
+`musicmaid` (GUI), `musicmaid-tui` (terminal UI) and `musicmaid-cli`. No root is needed except for the
+package step; `./install.sh --no-deps` skips it. Run `./install.sh` again at any time to reinstall, and
+your library and settings are kept.
 
-Optional menu entry: copy `packaging/musicmaid.desktop` to `~/.local/share/applications/`.
+`./uninstall.sh` removes the program but keeps your library database, settings and undo history.
+
+Prefer a single file? The [releases page](https://github.com/voidxzero/musicmaid/releases/latest) also
+has an AppImage and a self-contained tarball.
 
 ### Windows
 
@@ -163,10 +170,13 @@ is available you can install it from the app, or skip that version:
 | Windows portable zip | the new files are copied over the folder after MusicMaid closes, then it restarts |
 | AppImage | the AppImage file is replaced and MusicMaid restarts |
 | Linux tarball | the app folder is swapped for the new one and MusicMaid restarts |
+| Linux `./install.sh` | the new release's `install.sh --no-deps` runs (your data is kept) and MusicMaid restarts |
 | pip / git (source) | you're notified; update with `pip install -U` or `git pull` |
 
-Downloads are checked against the SHA-256 checksum GitHub publishes for each release file before anything is
-installed. Your library, settings and undo history live in the data folder and aren't touched.
+The built apps are checked against the SHA-256 checksum GitHub publishes for each release file before anything
+is installed. An `./install.sh` install downloads the release's source from GitHub over HTTPS, since GitHub
+publishes no checksum for source archives. Your library, settings and undo history live in the data folder
+and aren't touched.
 
 ## Data locations
 

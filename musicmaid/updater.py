@@ -7,9 +7,12 @@ How an update is installed depends on how MusicMaid was installed:
                          over, then relaunches.
 * ``appimage``           replace the AppImage file and relaunch.
 * ``linux-tarball``      swap the app folder for the new one and relaunch.
+* ``linux-install``      installed with ./install.sh: run the new release's install.sh --no-deps and relaunch.
 * ``source``             pip/git install: only notify, because pip or git manages the files.
 
-Every download is checked against the SHA-256 digest GitHub publishes for the release file.
+Every built download is checked against the SHA-256 digest GitHub publishes for the release file. The
+install.sh route downloads the release's source archive from GitHub over HTTPS (GitHub publishes no
+checksum for those).
 """
 from __future__ import annotations
 
@@ -51,6 +54,8 @@ class Update:
 
     @property
     def can_install(self) -> bool:
+        if self.kind == "linux-install":
+            return bool(self.asset_url)
         return bool(self.asset_url and self.sha256) and self.kind != "source"
 
 
@@ -70,8 +75,23 @@ def app_dir() -> Path:
     return Path(sys.executable).resolve().parent
 
 
+def install_prefix() -> Path:
+    """Where ./install.sh puts MusicMaid (lib/, venv/ next to the user's data)."""
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "musicmaid"
+
+
+def launcher_dir() -> Path:
+    return Path.home() / ".local" / "bin"
+
+
 def install_kind() -> str:
     if not getattr(sys, "frozen", False):
+        try:
+            here = Path(__file__).resolve().parent.parent
+            if sys.platform.startswith("linux") and here == (install_prefix() / "lib").resolve():
+                return "linux-install"
+        except OSError:
+            pass
         return "source"
     if sys.platform == "win32":
         return "windows-installer" if any(app_dir().glob("unins*.exe")) else "windows-portable"
@@ -118,6 +138,11 @@ def check(timeout: float = 10, kind: str | None = None) -> Update | None:
     kind = kind or install_kind()
     upd = Update(version=version, notes=(rel.get("body") or "").strip(), page=rel.get("html_url") or RELEASES_PAGE,
                  kind=kind)
+    if kind == "linux-install":
+        tag = rel.get("tag_name", "")
+        upd.asset_name = f"musicmaid-{version}-source.tar.gz"
+        upd.asset_url = f"https://codeload.github.com/{REPO}/tar.gz/refs/tags/{tag}" if tag else ""
+        return upd
     pat = asset_pattern(kind)
     for a in rel.get("assets", []):
         if pat and pat.match(a.get("name", "")):
@@ -132,7 +157,7 @@ def check(timeout: float = 10, kind: str | None = None) -> Update | None:
 def download(upd: Update, dest_dir: Path, task: Task = NULL_TASK) -> Path:
     from . import net
 
-    if not upd.sha256:
+    if not upd.sha256 and upd.kind != "linux-install":
         raise UpdateError("This release has no checksum, so it can't be installed automatically.")
     dest_dir.mkdir(parents=True, exist_ok=True)
     target = dest_dir / upd.asset_name
@@ -157,7 +182,7 @@ def download(upd: Update, dest_dir: Path, task: Task = NULL_TASK) -> Path:
     except Exception as e:
         target.unlink(missing_ok=True)
         raise UpdateError(f"Download failed: {e}") from e
-    if h.hexdigest() != upd.sha256:
+    if upd.sha256 and h.hexdigest() != upd.sha256:
         target.unlink(missing_ok=True)
         raise UpdateError("The download failed its checksum check, so nothing was installed.")
     return target
@@ -270,6 +295,32 @@ def install(upd: Update, task: Task = NULL_TASK, relaunch: bool = True) -> str:
             shutil.rmtree(work, ignore_errors=True)
         if relaunch:
             _spawn([str(current / Path(sys.executable).name)])
+        return f"Updated to MusicMaid {upd.version}."
+
+    if kind == "linux-install":
+        work = Path(tempfile.mkdtemp(prefix="musicmaid-update-"))
+        try:
+            archive = download(upd, work, task)
+            task.progress(0, 0, "Unpacking update…")
+            with tarfile.open(archive) as t:
+                t.extractall(work / "src", filter="data")
+            top = _single_top_dir(work / "src")
+            if not (top / "install.sh").is_file() or not (top / "musicmaid" / "__init__.py").is_file():
+                raise UpdateError("The download doesn't contain MusicMaid's install.sh.")
+            task.progress(0, 0, f"Installing MusicMaid {upd.version}…")
+            proc = subprocess.run(["bash", str(top / "install.sh"), "--no-deps"], cwd=top, env=clean_env(),
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  text=True, timeout=900)
+            for line in proc.stdout.splitlines():
+                line = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+                if line:
+                    task.log(line)
+            if proc.returncode != 0:
+                raise UpdateError(f"The installer stopped with an error (exit {proc.returncode}); see the log.")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        if relaunch:
+            _spawn([str(launcher_dir() / "musicmaid")])
         return f"Updated to MusicMaid {upd.version}."
 
     raise UpdateError(f"Automatic updates aren't supported for this install ({kind}).")

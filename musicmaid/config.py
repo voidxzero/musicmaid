@@ -16,11 +16,12 @@ def data_dir() -> Path:
     if override:
         p = Path(override)
     elif sys.platform == "win32":
-        p = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / APP_NAME
+        p = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / APP_NAME
     elif sys.platform == "darwin":
         p = Path.home() / "Library" / "Application Support" / APP_NAME
     else:
-        p = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "musicmaid"
+        # an empty XDG_DATA_HOME counts as unset (XDG spec); never fall back to a relative path
+        p = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "musicmaid"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
