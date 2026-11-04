@@ -95,3 +95,38 @@ def get_bytes(url: str, **kw) -> bytes | None:
     if r.status_code >= 400:
         return None
     return r.content
+
+
+def download_file(url: str, dest, *, sha256: str = "", task=None, label: str = "Downloading", timeout: float = 60):
+    """Stream url to dest (a Path), reporting progress; verify sha256 when given. Removes dest on failure."""
+    import hashlib
+    from pathlib import Path
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    h = hashlib.sha256()
+    done = 0
+    try:
+        with session().get(url, stream=True, timeout=timeout) as r:
+            if r.status_code != 200:
+                raise NetError(f"{label} failed (HTTP {r.status_code})")
+            total = int(r.headers.get("Content-Length") or 0)
+            with open(dest, "wb") as f:
+                for chunk in r.iter_content(1 << 16):
+                    if task is not None:
+                        task.progress(done // 1024, total // 1024, f"{label}… {done / 1e6:.0f} / {total / 1e6:.0f} MB")
+                    f.write(chunk)
+                    h.update(chunk)
+                    done += len(chunk)
+    except NetError:
+        dest.unlink(missing_ok=True)
+        raise
+    except requests.RequestException as e:
+        dest.unlink(missing_ok=True)
+        raise NetError(f"{label} failed: {e}") from e
+    except BaseException:
+        dest.unlink(missing_ok=True)
+        raise
+    if sha256 and h.hexdigest() != sha256.lower():
+        dest.unlink(missing_ok=True)
+        raise NetError(f"{label}: the download failed its checksum check")
+    return dest

@@ -28,6 +28,7 @@ from .screens import (
 KEYS_HELP = (
     "space  mark track     ctrl+a mark all\n/      search         enter  open folder\nt      auto-tag       "
     "i      identify\nc      clean up tags  w / W  artwork auto/pick\ne      edit tags      a / x  apply / discard\n"
+    "p      tags from folder names       k  split CUE sheets\ny / Y  copy file / folder path\n"
     "d      duplicates     o      organize files\nu      undo           f      library folders\n,      settings  "
     "     l      show log\nctrl+x cancel task    ?      this help"
 )
@@ -52,6 +53,7 @@ CSS = """
 ModalScreen { align: center middle; }
 .dialog-title { text-style: bold; margin-bottom: 1; }
 .dialog-text { margin-bottom: 1; }
+.dialog-scroll { height: auto; max-height: 28; }
 .buttons { height: auto; margin-top: 1; align-horizontal: right; }
 .buttons Button { margin-left: 1; }
 .form { height: auto; max-height: 30; }
@@ -96,6 +98,10 @@ class MusicMaidTUI(TaskMixin, App):
         Binding("l", "toggle_log", "Log", show=False),
         Binding("ctrl+x", "cancel", "Cancel task", show=False),
         Binding("question_mark", "keys", "Keys"),
+        Binding("p", "pathtags", "Tags from folders", show=False),
+        Binding("k", "split_cue", "Split CUE", show=False),
+        Binding("y", "copy_path", "Copy path", show=False),
+        Binding("Y", "copy_folder", "Copy folder", show=False),
     ]
 
     def __init__(self, lib: Library | None = None):
@@ -538,8 +544,89 @@ class MusicMaidTUI(TaskMixin, App):
         if not ids:
             self.notify("Selected tracks have no pending changes", severity="warning")
             return
-        self.start_task("Writing tags…", lambda task: self.lib.apply(ids, task),
-                        lambda r: self._finish(f"Wrote {r.written} files ({r.failed} failed). Undo with U.")(r))
+        from .. import tags as tagio
+        lines, n = [], 0
+        for t in self.lib.tracks(ids):
+            p = self.lib.db.proposal(t.id)
+            if not p:
+                continue
+            ch = [(f, t.tags.get(f, ""), v) for f, v in p.tags.items() if (v or "") != (t.tags.get(f) or "")]
+            n += len(ch) + (p.art is not None)
+            if len(lines) < 40:
+                lines.append(f"{t.filename}")
+                lines += [f"   {tagio.FIELD_LABELS.get(f, f)}: {old or '(empty)'} → {new or '(remove)'}"
+                          for f, old, new in ch[:8]]
+                if p.art is not None:
+                    lines.append("   Cover art: " + ("replace" if t.has_art else "add"))
+        if len(lines) >= 40:
+            lines.append("   …")
+
+        def go(ok: bool | None) -> None:
+            if ok:
+                self.start_task("Writing tags…", lambda task: self.lib.apply(ids, task),
+                                lambda r: self._finish(f"Wrote {r.written} files ({r.failed} failed). Undo with U.")(r))
+        self.push_screen(ConfirmScreen(f"Write {n} change(s) to {len(ids)} file(s)?\n\n" + "\n".join(lines)
+                                       + "\n\nEverything written can be undone with U.", "Write changes"), go)
+
+    def action_pathtags(self) -> None:
+        from .. import pathtags
+
+        def got(pattern: str | None) -> None:
+            if pattern is None:
+                return
+            pattern = pattern.strip()
+            if pattern:
+                try:
+                    pathtags.compile_pattern(pattern)
+                except ValueError as e:
+                    self.notify(f"Pattern problem: {e}", severity="error")
+                    return
+            self._scope("Tags from folder names",
+                        lambda ids, task: self.lib.tags_from_paths(ids, task, pattern=pattern or None),
+                        "Folder names: changes proposed for {r} tracks. Review, then apply with A.")
+        self.push_screen(InputScreen("Tags from folder names: pattern, or leave empty for automatic",
+                                     "", pathtags.EXAMPLES[1]), got)
+
+    def action_split_cue(self) -> None:
+        from .. import cuesplit
+        sheets = [s for s in self.lib.cue_sheets(self.folder) if s.splittable]
+        ready = []
+        for s in sheets:
+            try:
+                if not cuesplit.already_split(cuesplit.plan(s)):
+                    ready.append(s)
+            except cuesplit.CueError:
+                pass
+        where = os.path.basename(self.folder) if self.folder else "the library"
+        if not ready:
+            self.notify(f"No CUE sheets to split in {where}.")
+            return
+        if not cuesplit.find_ffmpeg():
+            self.notify("ffmpeg is needed to split CUE sheets. " + cuesplit.ffmpeg_help(), severity="error",
+                        timeout=12)
+            return
+
+        def go(ok: bool | None) -> None:
+            if ok:
+                self.start_task("Splitting CUE sheets…", lambda task: self.lib.split_cues(ready, task),
+                                lambda r: self._finish(f"Split into {r[0]} tracks ({r[1]} failed). Undo with U.")(r))
+        names = "\n".join(f"  {os.path.relpath(s.path, self.folder or os.path.dirname(s.path))}" for s in ready[:15])
+        self.push_screen(ConfirmScreen(f"Split {len(ready)} CUE sheet(s) in {where} into separate tracks?\n\n"
+                                       f"{names}\n\nThe big files and .cue sheets go to the quarantine folder "
+                                       "(undo with U).", "Split"), go)
+
+    def action_copy_path(self) -> None:
+        t = self._cursor_track()
+        if t:
+            self.copy_to_clipboard(t.path)
+            self.notify(f"Copied: {t.path}")
+
+    def action_copy_folder(self) -> None:
+        t = self._cursor_track()
+        path = t.folder if t else self.folder
+        if path:
+            self.copy_to_clipboard(path)
+            self.notify(f"Copied: {path}")
 
     def action_discard(self) -> None:
         ids = [i for i in self.selection() if i in self.pending]

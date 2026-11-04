@@ -26,6 +26,13 @@ It comes with three front-ends that share one engine:
 * **Offline clean-up.** It fixes ALL CAPS and lowercase text, strips junk like URLs or "(www.site.com)",
   and splits "Artist - Title" crammed into the title field. It fills missing tags from file and folder
   names, normalises track numbers and makes album fields consistent within a folder.
+* **Tags from folder names.** Fills in tags from your folder structure, either automatically (common layouts
+  like `Artist/Album (Year)/01 - Title`) or with a pattern such as `%artist%/%album% (%year%)/%track% - %title%`,
+  with a live preview. You choose whether to overwrite existing tags or only fill empty ones.
+* **Split CUE albums.** Albums stored as one big file plus a `.cue` sheet (including CUE sheets embedded in FLAC
+  files) are split into separate tagged tracks. Lossless images become FLAC tracks cut at exact sample positions,
+  and lossy images are cut without re-encoding. The original goes to quarantine, so Undo can restore it. Needs
+  ffmpeg: `install.sh` installs it on Linux, and on Windows MusicMaid offers to download it.
 * **Duplicates.** It finds byte-identical files, files with the **same audio** (fingerprint comparison,
   even across formats and bitrates) and files with the same artist, title and length. The best copy is
   kept: lossless first, then bitrate and tag quality. The others are moved to a quarantine folder or the
@@ -40,7 +47,8 @@ It comes with three front-ends that share one engine:
   under **View → Skin** or in **Settings**. Skins are small `.json` files with colours, not code, so they're safe
   to share, and skin files work in both apps.
 * **Safe by default.** Automatic results become **proposals** that you review (see *Needs review*) before
-  anything is written. Only matches above a confidence threshold (default 90%) are written automatically
+  anything is written. **Apply** first shows a preview of every change (old → new), where you can untick whole
+  tracks or single fields. Only matches above a confidence threshold (default 90%) are written automatically
   by *Auto-tag*. **Every** tag write, move and duplicate removal is journaled and can be **undone**.
 
 Formats: MP3, FLAC, Ogg Vorbis, Opus, M4A/AAC/ALAC, WMA, WAV, AIFF, WavPack, APE, Musepack, TTA and DSF.
@@ -109,9 +117,11 @@ Only each file's audio fingerprint and length are sent to AcoustID, never the au
 2. **Duplicates** → review the groups → *Remove checked copies*.
 3. Select everything → **Auto-tag**. This runs clean-up, identification and artwork; confident results
    are written, and everything else lands in **Needs review**.
-4. Open **Needs review**, check the proposed changes (shown in green), and **Apply** or **Discard** them.
-   Fix leftovers by hand in the tag editor.
-5. **Organize** to rename and move files into a clean folder structure.
+4. When changes are waiting, a bar above the track list says so. Click **Preview & Apply All**, untick
+   anything you don't want, and write the rest; or open **Needs review** to go through them track by track.
+   Fix leftovers by hand in the tag editor, or try **Tags from Folder Names** (in the Auto-Tag ▾ menu).
+5. **Split CUE** turns one-file albums into tracks; **Organize** renames and moves files into a clean folder
+   structure. Right-click a track or folder to copy its name or path.
 6. Changed your mind? Use **Undo**.
 
 ### Terminal UI keys
@@ -120,6 +130,7 @@ The left side shows the views (All tracks, Needs review, …) above a **folder t
 folder with `enter` to see its tracks (including subfolders) in album order.
 `space` mark · `ctrl+a` mark all · `/` search · `t` auto-tag · `i` identify · `c` clean up ·
 `w` find artwork · `W` pick artwork · `e` edit tags · `a` apply · `x` discard · `d` duplicates ·
+`p` tags from folder names · `k` split CUE sheets · `y` / `Y` copy file / folder path ·
 `o` organize · `u` undo · `f` library folders · `,` settings · `l` log · `ctrl+x` cancel task · `?` keys · `q` quit.
 Actions work on marked tracks; with nothing marked, they offer to work on the current view.
 
@@ -131,6 +142,8 @@ musicmaid-cli dupes                     # list duplicates;  --remove to quaranti
 musicmaid-cli autotag --view untagged   # identify + write confident matches
 musicmaid-cli review                    # show pending proposals
 musicmaid-cli apply --min-score 0.8
+musicmaid-cli pathtags --pattern '%artist%/%album%/%track% - %title%'   # tags from folders
+musicmaid-cli cue                       # list CUE sheets;  --go to split them
 musicmaid-cli organize                  # dry run;  --go to move files
 musicmaid-cli history && musicmaid-cli undo
 musicmaid-cli update                    # install a newer release  (--check: only check)

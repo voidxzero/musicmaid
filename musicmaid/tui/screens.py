@@ -33,7 +33,8 @@ class ConfirmScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
-            yield Static(self.message, classes="dialog-text")
+            with VerticalScroll(classes="dialog-scroll"):
+                yield Static(self.message, classes="dialog-text")
             with Horizontal(classes="buttons"):
                 yield Button(self.yes, variant="primary", id="yes")
                 yield Button("Cancel", id="no")

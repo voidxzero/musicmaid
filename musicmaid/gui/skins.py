@@ -688,8 +688,22 @@ def apply(name: str) -> str:
     elif _native_palette is not None:
         pal = QPalette(_native_palette)
     app.setPalette(pal)
-    app.setStyleSheet(stylesheet(name))
+    app.setStyleSheet(stylesheet(name) + _extra_qss(name))
     return name
+
+
+def _extra_qss(name: str) -> str:
+    """Rules for MusicMaid widgets Spindle doesn't have (split toolbar buttons like Auto-Tag ▾)."""
+    if name not in THEMES:
+        return ""
+    p = THEMES[name]
+    icons = _icons(name, p)
+    return """
+QToolButton[popupMode="1"] { padding-right: 16px; }
+QToolButton::menu-button { border: none; border-left: 1px solid %(border)s; width: 14px; background: transparent; }
+QToolButton::menu-button:hover { background: %(btn_top)s; }
+QToolButton::menu-arrow { image: url("%(down)s"); width: 9px; height: 9px; }
+""" % dict(p, down=icons.get("down", ""))
 
 
 _native_link = None

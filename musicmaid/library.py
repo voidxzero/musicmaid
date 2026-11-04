@@ -124,6 +124,12 @@ class Library:
     def cleanup(self, ids: list[int], task: Task = NULL_TASK, options: cleanup.CleanupOptions | None = None) -> int:
         return cleanup.propose_cleanup(self.db, self.db.tracks(ids), options, task, self.folders)
 
+    def tags_from_paths(self, ids: list[int], task: Task = NULL_TASK, *, pattern: str | None = None,
+                        overwrite: bool = False) -> int:
+        """Propose tags read from folder/file names (automatic, or a %artist%/%album%/... pattern)."""
+        from . import pathtags
+        return pathtags.propose(self.db, self.db.tracks(ids), self.folders, pattern or None, overwrite, task)
+
     def auto_tag(self, ids: list[int], task: Task = NULL_TASK, *, apply_confident: bool = True) -> dict[str, int]:
         """Clean up → identify → fetch missing art → write confident results."""
         self.cleanup(ids, task)
@@ -219,17 +225,32 @@ class Library:
                 self.db.journal(batch, label, "create", None, None, str(cover))
         scanner.refresh_track(self.db, t.path)
 
-    def apply(self, ids: list[int], task: Task = NULL_TASK, label: str = "Apply changes") -> ApplyResult:
+    def apply(self, ids: list[int], task: Task = NULL_TASK, label: str = "Apply changes",
+              exclude: dict[int, set[str]] | None = None) -> ApplyResult:
+        """Write proposals to the files. exclude maps track id -> fields to leave out ("__art__" = artwork);
+        left-out changes stay proposed, so they can still be applied or discarded later."""
         res = ApplyResult(batch=self.db.new_batch())
+        exclude = exclude or {}
         ids = [i for i in ids if i in self.db.proposal_ids()]
         for i, t in enumerate(self.db.tracks(ids)):
             task.progress(i, len(ids), f"Writing {t.filename}")
             p = self.db.proposal(t.id)
             if not p:
                 continue
+            skip = exclude.get(t.id, set())
+            tags = {k: v for k, v in p.tags.items() if k not in skip}
+            art = p.art if p.art is not None and "__art__" not in skip else None
+            if not tags and art is None:
+                continue
             try:
-                self._write_with_journal(res.batch, label, t, p.tags, p.art if p.art is not None else tagio._KEEP)
-                self.db.delete_proposals([t.id])
+                self._write_with_journal(res.batch, label, t, tags, art if art is not None else tagio._KEEP)
+                left = {k: v for k, v in p.tags.items() if k in skip}
+                left_art = p.art if "__art__" in skip else None
+                if left or left_art is not None:
+                    self.db.set_proposal(Proposal(t.id, left, left_art, p.art_source if left_art else None,
+                                                  p.source, p.score, p.note), merge=False)
+                else:
+                    self.db.delete_proposals([t.id])
                 res.written += 1
             except Cancelled:
                 raise
@@ -354,6 +375,63 @@ class Library:
                 task.log(f"Could not remove {t.path}: {e}")
         return removed, batch
 
+    # ------------------------------------------------------------ CUE sheets
+    def cue_sheets(self, folder: str | None = None) -> list["cuesplit.CueSheet"]:
+        """CUE sheets in the library (or one folder of it), including ones embedded in long FLAC files."""
+        from . import cuesplit
+        roots = [folder] if folder else self.folders
+        long_tracks = [t.path for t in self.db.tracks() if t.duration >= 15 * 60
+                       and (not folder or t.path.startswith(folder.rstrip(os.sep) + os.sep))]
+        return cuesplit.find_sheets(roots, long_tracks)
+
+    def split_cues(self, sheets: list["cuesplit.CueSheet"], task: Task = NULL_TASK, *, dest: str | None = None,
+                   remove_original: bool = True) -> tuple[int, int, str]:
+        """Split each sheet into track files (undoable). Returns (tracks created, sheets failed, batch).
+
+        With remove_original, the big audio file and its .cue go to the quarantine folder afterwards (only
+        when every track was created), so the album isn't in the library twice."""
+        from . import cuesplit
+        batch = self.db.new_batch()
+        label = "Split CUE sheets"
+        made = failed = 0
+        for n, sheet in enumerate(sheets, 1):
+            name = Path(sheet.path).name
+            task.log(f"[{n}/{len(sheets)}] {name}")
+            try:
+                jobs = cuesplit.plan(sheet, dest)
+
+                def created(path: str) -> None:
+                    self.db.journal(batch, label, "create", None, None, path)
+                    scanner.refresh_track(self.db, path)
+                done, skipped = cuesplit.split(jobs, task, on_created=created)
+                made += len(done)
+                if skipped:
+                    task.log(f"  {len(skipped)} track file(s) already existed and were left alone")
+                if remove_original and len(done) + len(skipped) == len(jobs):
+                    self._quarantine_cue_source(sheet, batch, label)
+            except cuesplit.CueError as e:
+                failed += 1
+                task.log(f"  Couldn't split {name}: {e}")
+        return made, failed, batch
+
+    def _quarantine_cue_source(self, sheet, batch: str, label: str) -> None:
+        qroot = self.settings.quarantine_path / batch
+        extra = [] if sheet.embedded else [sheet.path]
+        for path in [*sheet.files, *extra]:
+            if not os.path.exists(path):
+                continue
+            root = self._library_root(path)
+            rel = Path(path).relative_to(root) if root else Path(*Path(path).parts[1:])
+            dst = qroot / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            t = self.db.track_by_path(path)
+            shutil.move(path, dst)
+            if t:
+                self.db.journal(batch, label, "quarantine", t.id, path, str(dst), t.tags)
+                self.db.remove_tracks([t.id])
+            else:
+                self.db.journal(batch, label, "move", None, path, str(dst))
+
     # ------------------------------------------------------------ organizing
     def organize_plan(self, ids: list[int], pattern: str | None = None, destination: str | None = None,
                       skip_untagged: bool = True) -> list[organizer.Move]:
@@ -441,6 +519,9 @@ class Library:
                 elif op in ("copy", "create"):
                     if dst and os.path.exists(dst):
                         os.remove(dst)
+                    gone = self.db.track_by_path(dst) if dst else None
+                    if gone:
+                        self.db.remove_tracks([gone.id])
                 elif op == "tags":
                     t = self.db.track(track_id) if track_id else None
                     path = t.path if t else src

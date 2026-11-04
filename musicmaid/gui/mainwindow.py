@@ -26,7 +26,7 @@ from . import skins
 from .workers import TaskRunner, background
 
 COLUMNS = [
-    ("state", ""), ("artist", "Artist"), ("title", "Title"), ("album", "Album"), ("albumartist", "Album Artist"),
+    ("state", "Status"), ("artist", "Artist"), ("title", "Title"), ("album", "Album"), ("albumartist", "Album Artist"),
     ("tracknumber", "#"), ("date", "Year"), ("genre", "Genre"), ("format", "Format"), ("duration", "Length"),
     ("path", "File"),
 ]
@@ -72,15 +72,16 @@ class TrackModel(QAbstractTableModel):
 
     def _state(self, t: Track) -> tuple[str, QColor | None, str]:
         if t.error:
-            return "!", RED, t.error
+            return "Error", RED, f"Can't read this file: {t.error}"
         if t.id in self.pending:
             src, score, art = self.pending[t.id]
             ok = score >= self.lib.settings.auto_apply_threshold
-            return "±", GREEN if ok else AMBER, f"Pending changes from {src} (confidence {score:.0%})"
+            return "Review", GREEN if ok else AMBER, (f"Changes proposed by {src} (confidence {score:.0%}) - "
+                                                      "select it to see them, then Apply or Discard")
         probs = problems(t, self.lib.settings.artwork_min_size)
         if probs:
-            return "•", AMBER, ", ".join(probs)
-        return "✓", GREEN, "OK"
+            return "Check", AMBER, "Problems: " + ", ".join(probs)
+        return "OK", GREEN, "Tags look complete"
 
     def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
@@ -410,7 +411,7 @@ class MainWindow(QMainWindow):
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hdr.setStretchLastSection(True)
-        for i, w in enumerate([28, 170, 230, 190, 150, 40, 50, 100, 100, 55]):
+        for i, w in enumerate([62, 170, 230, 190, 150, 40, 50, 100, 100, 55]):
             self.table.setColumnWidth(i, w)
         self.table.selectionModel().selectionChanged.connect(lambda *_: self._sel_timer.start())
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -423,17 +424,71 @@ class MainWindow(QMainWindow):
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self.proxy.set_search)
 
-        center = QWidget()
-        cl = QVBoxLayout(center)
+        # banner shown while proposed changes are waiting
+        self.banner = QFrame()
+        self.banner.setObjectName("panel")
+        bl = QHBoxLayout(self.banner)
+        bl.setContentsMargins(8, 4, 8, 4)
+        self.banner_text = QLabel()
+        self.banner_text.setWordWrap(True)
+        self.b_review = QPushButton("Show Them")
+        self.b_review.clicked.connect(lambda: self.show_view("review"))
+        self.b_apply_all = QPushButton("Preview && Apply All…")
+        self.b_apply_all.setObjectName("primary")
+        self.b_apply_all.clicked.connect(self.apply_all)
+        self.b_discard_all = QPushButton("Discard All…")
+        self.b_discard_all.clicked.connect(self.discard_all)
+        bl.addWidget(self.banner_text, 1)
+        for b in (self.b_review, self.b_apply_all, self.b_discard_all):
+            bl.addWidget(b)
+        self.banner.hide()
+
+        table_page = QWidget()
+        cl = QVBoxLayout(table_page)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.addWidget(self.search)
+        cl.addWidget(self.banner)
         cl.addWidget(self.table)
+
+        # first start: a welcome page instead of an empty table
+        welcome = QWidget()
+        wl = QVBoxLayout(welcome)
+        wl.addStretch(1)
+        title = QLabel(f"<h2>Welcome to {APP_NAME}</h2>")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        steps = QLabel(
+            "<p>Tidy up your music library in a few steps:</p>"
+            "<ol><li><b>Add your music folder.</b> Nothing on disk changes until you say so.</li>"
+            "<li><b>Auto-Tag</b> fixes tags and finds cover art. Confident results are written, "
+            "the rest waits in <i>Needs review</i>.</li>"
+            "<li>Check the proposed changes, then <b>Apply</b> or <b>Discard</b> them.</li>"
+            "<li>Optionally remove <b>Duplicates</b>, split <b>CUE</b> albums and <b>Organize</b> files "
+            "into tidy folders.</li></ol><p>Every change can be undone.</p>")
+        steps.setWordWrap(True)
+        steps.setFixedWidth(560)
+        steps.setMinimumHeight(steps.heightForWidth(560) + 40)
+        add_btn = QPushButton("Add Music Folder…")
+        add_btn.setObjectName("primary")
+        add_btn.setMinimumHeight(36)
+        add_btn.clicked.connect(self.add_folder)
+        wl.addWidget(title)
+        wl.addWidget(steps, 0, Qt.AlignmentFlag.AlignHCenter)
+        wl.addSpacing(12)
+        wl.addWidget(add_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        wl.addStretch(2)
+
+        from PySide6.QtWidgets import QStackedWidget
+        center = QStackedWidget()
+        center.addWidget(welcome)
+        center.addWidget(table_page)
+        self.center = center
 
         self.detail = DetailPanel(self)
         detail_scroll = QScrollArea()
         detail_scroll.setWidgetResizable(True)
         detail_scroll.setWidget(self.detail)
         detail_scroll.setMinimumWidth(340)
+        self.detail_scroll = detail_scroll
 
         split = QSplitter()
         split.addWidget(sidebar)
@@ -487,15 +542,20 @@ class MainWindow(QMainWindow):
     def _build_actions(self) -> None:
         P = QStyle.StandardPixmap
         self.a_add = self._act("Add Folder…", self.add_folder, "Ctrl+O", P.SP_DirOpenIcon, "Add a music folder to the library")
-        self.a_scan = self._act("Scan", self.scan, "F5", P.SP_BrowserReload, "Rescan library folders for changes")
+        self.a_scan = self._act("Rescan", self.scan, "F5", P.SP_BrowserReload,
+                                "Look for new, changed and deleted files in your library folders")
         self.a_auto = self._act("Auto-Tag", self.auto_tag, "Ctrl+T", P.SP_MediaPlay,
                                 "Clean up, identify online and fetch artwork; confident results are written automatically")
-        self.a_ident = self._act("Identify", self.identify, "Ctrl+I", P.SP_FileDialogContentsView,
-                                 "Look up selected tracks on MusicBrainz / AcoustID (proposes changes)")
-        self.a_clean = self._act("Clean Up", self.cleanup, "Ctrl+L", P.SP_DialogResetButton,
-                                 "Fix capitalisation, junk text, fill tags from file names (proposes changes)")
-        self.a_art = self._act("Artwork", self.fetch_artwork, "Ctrl+K", P.SP_DesktopIcon,
+        self.a_ident = self._act("Identify Online", self.identify, "Ctrl+I", P.SP_FileDialogContentsView,
+                                 "Look up tracks on MusicBrainz / AcoustID (proposes changes for review)")
+        self.a_clean = self._act("Clean Up Tags", self.cleanup, "Ctrl+L", P.SP_DialogResetButton,
+                                 "Fix capitalisation and junk text, fill empty tags from file names (proposes changes)")
+        self.a_paths = self._act("Tags from Folder Names…", self.tags_from_paths, "Ctrl+Shift+F", P.SP_DirIcon,
+                                 "Fill in tags from the folder structure, e.g. Artist/Album (Year)/01 - Title")
+        self.a_art = self._act("Find Artwork", self.fetch_artwork, "Ctrl+K", P.SP_DesktopIcon,
                                "Find missing cover art (Cover Art Archive, iTunes, Deezer)")
+        self.a_cue = self._act("Split CUE", self.split_cue, None, P.SP_MediaSeekForward,
+                               "Split albums stored as one big file + .cue sheet into separate tagged tracks")
         self.a_apply = self._act("Apply", self.apply, "Ctrl+Return", P.SP_DialogApplyButton,
                                  "Write proposed changes of the selected tracks to the files")
         self.a_discard = self._act("Discard", self.discard, "Ctrl+Backspace", P.SP_DialogDiscardButton,
@@ -514,9 +574,24 @@ class MainWindow(QMainWindow):
         tb.setObjectName("main-toolbar")
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         tb.setMovable(False)
-        for a in (self.a_add, self.a_scan, None, self.a_auto, self.a_ident, self.a_clean, self.a_art, None,
-                  self.a_apply, self.a_discard, None, self.a_dupes, self.a_org, None, self.a_undo, self.a_settings):
-            tb.addSeparator() if a is None else tb.addAction(a)
+        # Auto-Tag does everything; its menu has the individual steps
+        from PySide6.QtWidgets import QToolButton
+        auto_menu = QMenu(self)
+        for a in (self.a_ident, self.a_clean, self.a_paths, None, self.a_art, self.a_choose_art):
+            auto_menu.addSeparator() if a is None else auto_menu.addAction(a)
+        auto_btn = QToolButton()
+        auto_btn.setDefaultAction(self.a_auto)
+        auto_btn.setMenu(auto_menu)
+        auto_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        auto_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        for a in (self.a_add, self.a_scan, None, "auto", None, self.a_apply, self.a_discard, None,
+                  self.a_dupes, self.a_cue, self.a_org, None, self.a_undo, self.a_settings):
+            if a is None:
+                tb.addSeparator()
+            elif a == "auto":
+                tb.addWidget(auto_btn)
+            else:
+                tb.addAction(a)
         self.addToolBar(tb)
 
         m = self.menuBar()
@@ -526,12 +601,12 @@ class MainWindow(QMainWindow):
         f.addSeparator()
         f.addAction(self._act("Quit", self.close, "Ctrl+Q"))
         t = m.addMenu("&Tags")
-        for a in (self.a_auto, self.a_ident, self.a_clean, self.a_art, self.a_choose_art, None, self.a_apply,
-                  self.a_discard, self.a_undo):
+        for a in (self.a_auto, None, self.a_ident, self.a_clean, self.a_paths, self.a_art, self.a_choose_art, None,
+                  self.a_apply, self.a_discard, self.a_undo):
             t.addSeparator() if a is None else t.addAction(a)
         lib_menu = m.addMenu("&Library")
-        for a in (self.a_dupes, self.a_org, self.a_select_all, self.a_log):
-            lib_menu.addAction(a)
+        for a in (self.a_dupes, self.a_cue, self.a_org, None, self.a_select_all, self.a_log):
+            lib_menu.addSeparator() if a is None else lib_menu.addAction(a)
         v = m.addMenu("&View")
         self.skin_menu = v.addMenu("&Skin")
         self.fill_skin_menu()
@@ -801,7 +876,33 @@ class MainWindow(QMainWindow):
         self._show_folder(selected)
         self.status.setText(f"{counts['all']} tracks · {counts['review']} awaiting review · "
                             f"{counts['problems']} with problems")
+        self.center.setCurrentIndex(1 if self.lib.folders else 0)
+        self.detail_scroll.setVisible(bool(self.lib.folders))
+        n = counts["review"]
+        self.banner.setVisible(n > 0)
+        if n:
+            self.banner_text.setText(f"<b>{n} track{'s have' if n != 1 else ' has'} proposed changes.</b> "
+                                     "Select a track to see them.")
+            self.b_review.setVisible(self.view_name != "review")
         self._selection_changed()
+
+    def show_view(self, key: str) -> None:
+        for i in range(self.views.count()):
+            if self.views.item(i).data(Qt.ItemDataRole.UserRole) == key:
+                self.views.setCurrentRow(i)
+                return
+
+    def apply_all(self) -> None:
+        ids = sorted(self.lib.db.proposal_ids())
+        if ids:
+            self._preview_and_apply(ids)
+
+    def discard_all(self) -> None:
+        ids = sorted(self.lib.db.proposal_ids())
+        if ids and QMessageBox.question(self, "Discard all", f"Drop the proposed changes of all {len(ids)} "
+                                        "tracks? The files aren't touched.") == QMessageBox.StandardButton.Yes:
+            self.lib.discard(ids)
+            self.reload()
 
     def _show_folder(self, selected: set[int] | None = None) -> None:
         """Fill the table with the current view's tracks in the chosen folder (and below)."""
@@ -888,8 +989,14 @@ class MainWindow(QMainWindow):
         if not path:
             return
         menu = QMenu(self)
+        menu.addAction(self._act("Copy Folder Name", lambda: self._copy(Path(path).name)))
+        menu.addAction(self._act("Copy Folder Path", lambda: self._copy(path)))
+        menu.addSeparator()
         menu.addAction(self._act("Select All Tracks in This Folder", lambda: (self.tree.setCurrentItem(item),
                                                                            self.table.selectAll())))
+        menu.addAction(self._act("Tags from Folder Names…", lambda: (self.tree.setCurrentItem(item),
+                                                                  self.tags_from_paths())))
+        menu.addAction(self._act("Split CUE Sheets Here…", lambda: self.split_cue(path)))
         menu.addAction(self._act("Expand All Below", lambda: self._expand(item, True)))
         menu.addAction(self._act("Collapse All Below", lambda: self._expand(item, False)))
         menu.addSeparator()
@@ -913,12 +1020,31 @@ class MainWindow(QMainWindow):
 
     def _context_menu(self, pos) -> None:
         menu = QMenu(self)
-        for a in (self.a_auto, self.a_ident, self.a_clean, self.a_art, self.a_choose_art, None, self.a_apply,
-                  self.a_discard, None, self.a_org):
+        copy = menu.addMenu("Copy")
+        tracks = self.lib.tracks(self.selected_ids())
+        if tracks:
+            def names(fn):
+                return lambda: self._copy("\n".join(dict.fromkeys(fn(t) for t in tracks)))
+            copy.addAction(self._act("File Name", names(lambda t: t.filename)))
+            copy.addAction(self._act("Full Path", names(lambda t: t.path)))
+            copy.addAction(self._act("Folder Name", names(lambda t: Path(t.folder).name)))
+            copy.addAction(self._act("Folder Path", names(lambda t: t.folder)))
+            copy.addAction(self._act("Artist - Title", names(lambda t: " - ".join(
+                x for x in (t.get("artist"), t.get("title") or Path(t.path).stem) if x))))
+        copy.setEnabled(bool(tracks))
+        menu.addSeparator()
+        for a in (self.a_auto, self.a_ident, self.a_clean, self.a_paths, self.a_art, self.a_choose_art, None,
+                  self.a_apply, self.a_discard, None, self.a_org):
             menu.addSeparator() if a is None else menu.addAction(a)
         menu.addSeparator()
         menu.addAction(self._act("Open Containing Folder", self._open_folder))
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _copy(self, text: str) -> None:
+        QApplication.clipboard().setText(text)
+        lines = text.count("\n") + 1
+        self.status.setText(f"Copied {lines} line{'s' if lines != 1 else ''} to the clipboard" if lines > 1
+                            else f"Copied: {text}")
 
     def _open_folder(self) -> None:
         from PySide6.QtCore import QUrl
@@ -1004,6 +1130,42 @@ class MainWindow(QMainWindow):
             self.run("Finding artwork…", lambda task: self.lib.fetch_artwork(ids, task),
                      self._after("Found artwork for {r} tracks"))
 
+    def tags_from_paths(self) -> None:
+        from .dialogs import PathTagsDialog
+        ids = self.selected_ids() or self.visible_ids()
+        if not ids:
+            self.status.setText("No tracks to read folder names from")
+            return
+        d = PathTagsDialog(self.lib, self.lib.tracks(ids), self)
+        if d.exec():
+            pattern, overwrite = d.result_options()
+            self.run("Reading folder names…",
+                     lambda task: self.lib.tags_from_paths(ids, task, pattern=pattern, overwrite=overwrite),
+                     self._after("Folder names: changes proposed for {r} tracks - review them, then Apply"))
+
+    def split_cue(self, folder: str | None = None) -> None:
+        from .dialogs import CueDialog
+        if not self.lib.folders:
+            self.add_folder()
+            return
+        d = CueDialog(self.lib, self, folder=folder if isinstance(folder, str) else self.folder)
+        if not d.exec():
+            return
+        sheets = d.chosen
+        dest, remove = d.options()
+
+        def done(r) -> None:
+            made, failed, batch = r
+            msg = f"Split {len(sheets) - failed} CUE sheet(s) into {made} tracks"
+            if failed:
+                msg += f"; {failed} couldn't be split (see the log)"
+                self.log_dock.show()
+            self._log(msg + " - Ctrl+Z to undo")
+            self.reload()
+            self.status.setText(msg)
+        self.run("Splitting CUE sheets…",
+                 lambda task: self.lib.split_cues(sheets, task, dest=dest, remove_original=remove), done)
+
     def choose_artwork(self) -> None:
         ids = self.selected_ids()
         if not ids:
@@ -1025,11 +1187,20 @@ class MainWindow(QMainWindow):
             if not vis:
                 self.status.setText("Nothing to apply")
                 return
-            if QMessageBox.question(self, "Apply", f"Write proposed changes for all {len(vis)} tracks in this view?") \
-                    != QMessageBox.StandardButton.Yes:
-                return
             ids = vis
-        self.run("Writing tags…", lambda task: self.lib.apply(ids, task),
+        self._preview_and_apply(ids)
+
+    def _preview_and_apply(self, ids: list[int]) -> None:
+        """Show every change first; write only what's still ticked."""
+        from .dialogs import ApplyPreviewDialog
+        d = ApplyPreviewDialog(self.lib, ids, self)
+        if not d.tree.topLevelItemCount():
+            self.status.setText("Nothing to apply: the proposed values are already in the files")
+            return
+        if not d.exec():
+            return
+        write, exclude = d.selection()
+        self.run("Writing tags…", lambda task: self.lib.apply(write, task, exclude=exclude),
                  self._after("Wrote {r.written} files ({r.failed} failed) — Ctrl+Z to undo", None))
 
     def discard(self) -> None:

@@ -21,20 +21,23 @@ warn() { printf '\033[1;31m!!\033[0m %s\n' "$*"; }
 [[ -f "$SRC/musicmaid/__init__.py" ]] || { warn "Run this from the MusicMaid folder (musicmaid/ not found)"; exit 1; }
 
 if [[ $DEPS == 1 ]]; then
-  say "Installing Chromaprint (fpcalc) and Python libraries with your package manager (sudo may ask for your password)"
+  say "Installing Chromaprint (fpcalc), ffmpeg and Python libraries with your package manager (sudo may ask for your password)"
   if command -v apt-get >/dev/null; then
-    sudo apt-get install -y python3-venv python3-pip libchromaprint-tools libxcb-cursor0 \
+    sudo apt-get install -y python3-venv python3-pip libchromaprint-tools libxcb-cursor0 ffmpeg \
       || warn "some packages failed to install"
   elif command -v dnf >/dev/null; then
     # Fedora ships everything MusicMaid needs, so pip has little or nothing left to download.
     if dnf --version 2>/dev/null | grep -qi dnf5; then SKIP=--skip-unavailable; else SKIP=--setopt=strict=0; fi
-    sudo dnf install -y $SKIP chromaprint-tools xcb-util-cursor python3-pip python3-pyside6 python3-mutagen \
+    # ffmpeg-free unless RPM Fusion's full ffmpeg is already installed (the two conflict)
+    FF=ffmpeg-free
+    rpm -q ffmpeg >/dev/null 2>&1 && FF=ffmpeg
+    sudo dnf install -y $SKIP "$FF" chromaprint-tools xcb-util-cursor python3-pip python3-pyside6 python3-mutagen \
       python3-numpy python3-pillow python3-requests python3-send2trash python3-textual \
       || warn "some packages failed to install"
   elif command -v pacman >/dev/null; then
-    sudo pacman -S --needed --noconfirm chromaprint python-pip xcb-util-cursor || warn "some packages failed to install"
+    sudo pacman -S --needed --noconfirm chromaprint ffmpeg python-pip xcb-util-cursor || warn "some packages failed to install"
   elif command -v zypper >/dev/null; then
-    sudo zypper install -y chromaprint-fpcalc python3-pip || warn "some packages failed to install"
+    sudo zypper install -y chromaprint-fpcalc ffmpeg python3-pip || warn "some packages failed to install"
   else
     warn "Unknown package manager. Install Chromaprint's fpcalc if you can (MusicMaid can also download it)."
   fi
@@ -125,5 +128,6 @@ say "Checking the installation"
 
 case ":$PATH:" in *":$BIN:"*) ;; *) warn "$BIN is not on your PATH; launch from the app menu or add it." ;; esac
 command -v fpcalc >/dev/null || warn "fpcalc not found: MusicMaid will offer to download it on first start."
+command -v ffmpeg >/dev/null || warn "ffmpeg not found: needed only to split CUE sheets."
 VER=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$SRC/musicmaid/__init__.py")
 say "Done: MusicMaid $VER. Start it from your application menu, or run: musicmaid   (terminal UI: musicmaid-tui)"

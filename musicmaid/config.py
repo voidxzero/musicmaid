@@ -34,6 +34,7 @@ class Settings:
     library_folders: list[str] = field(default_factory=list)
     acoustid_api_key: str = ""
     fpcalc_path: str = ""  # empty = auto-detect
+    ffmpeg_path: str = ""  # empty = auto-detect (needed to split CUE sheets)
     offer_fpcalc_download: bool = True  # ask at startup when fpcalc is missing
     offer_acoustid_key: bool = True  # ask at startup when no AcoustID key is set
     skin: str = ""  # GUI skin (see gui/skins.py); empty = the platform default, "System" = desktop look

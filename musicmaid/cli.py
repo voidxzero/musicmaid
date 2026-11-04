@@ -67,6 +67,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-fingerprint", action="store_true")
     p.add_argument("--same-album", action="store_true")
     p.add_argument("--remove", action="store_true", help="quarantine all but the best copy")
+    p = with_sel(sub.add_parser("pathtags", help="propose tags from folder/file names"))
+    p.add_argument("--pattern", help="e.g. '%%artist%%/%%album%% (%%year%%)/%%track%% - %%title%%' (default: automatic)")
+    p.add_argument("--overwrite", action="store_true", help="also replace tags that already have a value")
+    p = sub.add_parser("cue", help="split CUE sheet albums into separate tracks")
+    p.add_argument("--folder", help="only look in this folder (default: the whole library)")
+    p.add_argument("--dest", help="put the tracks here (default: next to each CUE sheet)")
+    p.add_argument("--keep-original", action="store_true", help="don't quarantine the big file and .cue")
+    p.add_argument("--go", action="store_true", help="actually split (default: just list what was found)")
     p = with_sel(sub.add_parser("organize", help="rename/move files from tags"))
     p.add_argument("--pattern")
     p.add_argument("--dest")
@@ -159,6 +167,31 @@ def main(argv: list[str] | None = None) -> int:
             n, batch = lib.remove_duplicates(list(remove), remove, task)
             _done()
             print(f"Moved {n} files to {lib.settings.quarantine_path / batch}. Undo with: musicmaid-cli undo {batch}")
+    elif args.cmd == "pathtags":
+        n = lib.tags_from_paths(_ids(lib, args), task, pattern=args.pattern, overwrite=args.overwrite)
+        _done()
+        print(f"{n} tracks have proposed changes. Review with: musicmaid-cli review")
+    elif args.cmd == "cue":
+        from . import cuesplit
+        sheets = lib.cue_sheets(args.folder)
+        ready = []
+        for sh in sheets:
+            status = sh.problems[0] if sh.problems else ("ready" if sh.splittable else "already one file per track")
+            if status == "ready" and cuesplit.already_split(cuesplit.plan(sh, args.dest)):
+                status = "already split"
+            print(f"{status:>28}  {sh.path}{'  (embedded)' if sh.embedded else ''}")
+            if status == "ready":
+                ready.append(sh)
+        print(f"\n{len(sheets)} CUE sheets, {len(ready)} ready to split.")
+        if ready and not args.go:
+            print("Add --go to split them.")
+        if ready and args.go:
+            if not cuesplit.find_ffmpeg():
+                print("ffmpeg is needed. " + cuesplit.ffmpeg_help())
+                return 1
+            made, failed, batch = lib.split_cues(ready, task, dest=args.dest, remove_original=not args.keep_original)
+            _done()
+            print(f"Created {made} tracks ({failed} sheets failed). Undo with: musicmaid-cli undo {batch}")
     elif args.cmd == "organize":
         moves = [m for m in lib.organize_plan(_ids(lib, args), args.pattern, args.dest) if m.changed]
         for m in moves:
