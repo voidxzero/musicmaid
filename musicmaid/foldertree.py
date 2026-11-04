@@ -14,6 +14,7 @@ class FolderNode:
     path: str                    # absolute folder path
     name: str                    # what the tree shows
     count: int = 0               # tracks in this folder and everything below it
+    flagged: int = 0             # of those, how many the caller flagged (e.g. tracks with problems)
     children: list["FolderNode"] = field(default_factory=list)
 
     def find(self, path: str) -> "FolderNode | None":
@@ -29,7 +30,7 @@ def _norm(p: str) -> str:
     return os.path.normpath(p)
 
 
-def build(tracks: list[Track], roots: list[str]) -> list[FolderNode]:
+def build(tracks: list[Track], roots: list[str], flag=None) -> list[FolderNode]:
     """One node per library folder (plus one per outside folder), with nested subfolders.
 
     Only folders that contain tracks (directly or below) appear. Chains of folders that hold nothing but a
@@ -55,9 +56,11 @@ def build(tracks: list[Track], roots: list[str]) -> list[FolderNode]:
 
     for t in tracks:
         n = node_for(_norm(t.folder))
+        flagged = bool(flag(t)) if flag else False
         # count the track on this node and every ancestor
         while True:
             n.count += 1
+            n.flagged += flagged
             parent = os.path.dirname(n.path)
             if n.path in top or parent == n.path:
                 break

@@ -463,82 +463,205 @@ class DuplicatesDialog(QDialog):
 
 # ---------------------------------------------------------------- organize
 class OrganizeDialog(QDialog):
+    """Rename files and folders from their tags and sort them into a folder structure, with a full preview."""
     changed = Signal()
 
-    def __init__(self, lib: Library, runner: TaskRunner, ids: list[int], parent=None):
+    FOLDERS = [
+        ("Artist / Album (Year)", "{albumartist}/{album} ({year})"),
+        ("Artist / Year - Album", "{albumartist}/{year} - {album}"),
+        ("Artist / Album", "{albumartist}/{album}"),
+        ("Artist - Album (Year)", "{albumartist} - {album} ({year})"),
+        ("Genre / Artist / Album", "{genre}/{albumartist}/{album} ({year})"),
+        ("A-Z / Artist / Album", "{artist_initial}/{albumartist}/{album} ({year})"),
+        ("Keep the current folders (only rename files)", "{current_folder}"),
+    ]
+    FILES = [
+        ("01 - Title", "{disc_prefix}{tracknumber:02} - {title}"),
+        ("01. Title", "{disc_prefix}{tracknumber:02}. {title}"),
+        ("01 - Artist - Title", "{disc_prefix}{tracknumber:02} - {artist} - {title}"),
+        ("Artist - Title", "{artist} - {title}"),
+        ("Keep the current file names (only reorganize folders)", "{current_name}"),
+    ]
+
+    def __init__(self, lib: Library, runner: TaskRunner, ids: list[int], parent=None, all_ids: list[int] = ()):
         super().__init__(parent)
-        self.setWindowTitle(f"Organize {len(ids)} files")
-        self.resize(1100, 620)
-        self.lib, self.runner, self.ids = lib, runner, ids
+        from PySide6.QtWidgets import QButtonGroup, QRadioButton
+        self.setWindowTitle("Rename & Organize")
+        self.resize(1150, 680)
+        self.lib, self.runner = lib, runner
+        self.sel_ids, self.all_ids = list(ids), list(all_ids)
         self.moves = []
         s = lib.settings
+        lay = QVBoxLayout(self)
+        intro = QLabel("Give files and folders tidy names from their tags. Check the preview below; nothing moves "
+                       "until you click the button, and Undo puts everything back.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
         form = QFormLayout()
+        self.scope_sel = QRadioButton(f"The selected tracks ({len(self.sel_ids)})")
+        self.scope_all = QRadioButton(f"The whole library ({len(self.all_ids)} tracks)")
+        grp = QButtonGroup(self)
+        grp.addButton(self.scope_sel)
+        grp.addButton(self.scope_all)
+        (self.scope_sel if self.sel_ids else self.scope_all).setChecked(True)
+        self.scope_sel.setEnabled(bool(self.sel_ids))
+        scope_row = QHBoxLayout()
+        scope_row.addWidget(self.scope_sel)
+        scope_row.addWidget(self.scope_all)
+        scope_row.addStretch(1)
+        form.addRow("Work on", scope_row)
+        self.folders = QComboBox()
+        for label, pat in self.FOLDERS:
+            self.folders.addItem(label, pat)
+        self.files = QComboBox()
+        for label, pat in self.FILES:
+            self.files.addItem(label, pat)
+        form.addRow("Folders", self.folders)
+        form.addRow("File names", self.files)
+        self.custom = QCheckBox("Custom pattern")
         self.pattern = QLineEdit(s.organize_pattern)
-        form.addRow("Pattern", self.pattern)
-        help_ = QLabel(PATTERN_HELP)
-        help_.setWordWrap(True)
-        help_.setObjectName("dim")
-        form.addRow("", help_)
+        self.pattern.setEnabled(False)
+        crow = QHBoxLayout()
+        crow.addWidget(self.custom)
+        crow.addWidget(self.pattern, 1)
+        form.addRow("", crow)
+        self.help = QLabel(PATTERN_HELP)
+        self.help.setWordWrap(True)
+        self.help.setObjectName("dim")
+        self.help.setVisible(False)
+        form.addRow("", self.help)
         self.dest = QLineEdit(s.organize_destination or (lib.folders[0] if lib.folders else ""))
-        form.addRow("Destination", _browse_row(self.dest, self))
-        self.copy = QCheckBox("Copy instead of move")
+        self.dest_row = _browse_row(self.dest, self)
+        form.addRow("Put them in", self.dest_row)
+        self.copy = QCheckBox("Copy instead of move (keeps the originals)")
         self.copy.setChecked(s.organize_copy)
-        self.skip = QCheckBox("Skip files without artist/title")
+        self.skip = QCheckBox("Leave files without artist/title alone")
         self.skip.setChecked(True)
-        row = QHBoxLayout()
-        row.addWidget(self.copy)
-        row.addWidget(self.skip)
-        row.addStretch(1)
-        preview = QPushButton("Preview")
-        preview.clicked.connect(self.preview)
-        row.addWidget(preview)
+        opt = QHBoxLayout()
+        opt.addWidget(self.copy)
+        opt.addWidget(self.skip)
+        opt.addStretch(1)
+        form.addRow("", opt)
+        lay.addLayout(form)
+        # pick the presets matching the saved pattern
+        saved = s.organize_pattern.replace("\\", "/")
+        for i, (_, pat) in enumerate(self.FOLDERS):
+            for j, (_, fpat) in enumerate(self.FILES):
+                if saved == f"{pat}/{fpat}":
+                    self.folders.setCurrentIndex(i)
+                    self.files.setCurrentIndex(j)
+                    break
+            else:
+                continue
+            break
+        else:
+            if saved and saved != f"{self.FOLDERS[0][1]}/{self.FILES[0][1]}":
+                self.custom.setChecked(True)
+                self.pattern.setEnabled(True)
+                self.help.setVisible(True)
+
         self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Current location", "New location"])
+        self.table.setHorizontalHeaderLabels(["Now (inside your library folder)", "Will become"])
+        self.table.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setWordWrap(False)
+        lay.addWidget(self.table, 1)
         self.info = QLabel()
-        go = QPushButton("Move files")
-        go.clicked.connect(self.go)
-        self.copy.toggled.connect(lambda c: go.setText("Copy files" if c else "Move files"))
+        self.info.setWordWrap(True)
+        self.go_btn = QPushButton("Rename && Move")
+        self.go_btn.setObjectName("primary")
+        self.go_btn.clicked.connect(self.go)
         close = QPushButton("Close")
         close.clicked.connect(self.reject)
         bottom = QHBoxLayout()
         bottom.addWidget(self.info, 1)
-        bottom.addWidget(go)
+        bottom.addWidget(self.go_btn)
         bottom.addWidget(close)
-        lay = QVBoxLayout(self)
-        lay.addLayout(form)
-        lay.addLayout(row)
-        lay.addWidget(self.table, 1)
         lay.addLayout(bottom)
-        self.pattern.textChanged.connect(self.preview)
+
+        from PySide6.QtCore import QTimer
+        self._timer = QTimer(self, singleShot=True, interval=250)
+        self._timer.timeout.connect(self.preview)
+        for sig in (self.folders.currentIndexChanged, self.files.currentIndexChanged, self.custom.toggled,
+                    self.pattern.textChanged, self.dest.textChanged, self.copy.toggled, self.skip.toggled,
+                    self.scope_sel.toggled):
+            sig.connect(lambda *_: self._timer.start())
+        self.custom.toggled.connect(self._custom_toggled)
+        self.folders.currentIndexChanged.connect(self._sync_pattern)
+        self.files.currentIndexChanged.connect(self._sync_pattern)
+        self._sync_pattern()
         self.preview()
 
+    def _custom_toggled(self, on: bool) -> None:
+        self.pattern.setEnabled(on)
+        self.help.setVisible(on)
+        self.folders.setEnabled(not on)
+        self.files.setEnabled(not on)
+        if not on:
+            self._sync_pattern()
+
+    def _sync_pattern(self) -> None:
+        if not self.custom.isChecked():
+            self.pattern.setText(f"{self.folders.currentData()}/{self.files.currentData()}")
+
+    def _ids(self) -> list[int]:
+        return self.sel_ids if self.scope_sel.isChecked() else self.all_ids
+
     def preview(self) -> None:
+        pattern = self.pattern.text()
+        keep_folders = "{current_folder}" in pattern
+        self.dest_row.setEnabled(not keep_folders)
         try:
-            self.moves = [m for m in self.lib.organize_plan(self.ids, self.pattern.text(), self.dest.text().strip(),
+            self.moves = [m for m in self.lib.organize_plan(self._ids(), pattern, self.dest.text().strip(),
                                                             self.skip.isChecked()) if m.changed]
         except (ValueError, KeyError, IndexError) as e:
-            self.info.setText(f"⚠ {e}")
+            self.info.setText(f"<span style='color:#da3633'><b>Problem with the pattern:</b> {e}</span>")
+            self.go_btn.setEnabled(False)
             return
         shown = self.moves[:3000]
         self.table.setRowCount(len(shown))
+        import os
+
+        def short(path: str) -> str:
+            # relative to the library folder, so the part that changes is what you see
+            for root in sorted(self.lib.folders, key=len, reverse=True):
+                r = root.rstrip("/\\") + os.sep
+                if path.startswith(r):
+                    return path[len(r):]
+            return path
         for i, m in enumerate(shown):
-            self.table.setItem(i, 0, QTableWidgetItem(m.src))
-            self.table.setItem(i, 1, QTableWidgetItem(m.dst))
-        pending = len(self.lib.db.proposal_ids() & set(self.ids))
-        msg = f"{len(self.moves)} files will be {'copied' if self.copy.isChecked() else 'moved'}."
+            a = QTableWidgetItem(short(m.src))
+            b = QTableWidgetItem(short(m.dst))
+            a.setToolTip(m.src)
+            b.setToolTip(m.dst)
+            self.table.setItem(i, 0, a)
+            self.table.setItem(i, 1, b)
+        verb = "copied" if self.copy.isChecked() else "renamed or moved"
+        msg = f"<b>{len(self.moves)} file{'s' if len(self.moves) != 1 else ''} will be {verb}.</b>"
+        if not self.moves:
+            msg = "<b>Nothing to do</b>: these files already have these names."
+        pending = len(self.lib.db.proposal_ids() & set(self._ids()))
         if pending:
-            msg += f"  ⚠ {pending} tracks have unapplied changes — apply them first for best results."
+            msg += (f" <span style='color:#da3633'><b>{pending} tracks still have unapplied changes</b> - "
+                    "apply or discard them first, so the names use the right tags.</span>")
         self.info.setText(msg)
+        self.go_btn.setEnabled(bool(self.moves))
+        self.go_btn.setText("Copy Files" if self.copy.isChecked() else "Rename && Move")
 
     def go(self) -> None:
         self.preview()
         if not self.moves:
             return
+        if QMessageBox.question(self, "Rename & Organize", f"{'Copy' if self.copy.isChecked() else 'Rename/move'} "
+                                f"{len(self.moves)} files now? You can undo this afterwards.") \
+                != QMessageBox.StandardButton.Yes:
+            return
         s = self.lib.settings
         s.organize_pattern = self.pattern.text()
-        s.organize_destination = self.dest.text().strip()
+        if "{current_folder}" not in self.pattern.text():
+            s.organize_destination = self.dest.text().strip()
         s.organize_copy = self.copy.isChecked()
         save_settings(s)
         moves, copy = list(self.moves), self.copy.isChecked()

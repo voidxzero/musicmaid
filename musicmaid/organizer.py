@@ -15,7 +15,8 @@ FOLDER_IMAGES = {"cover.jpg", "cover.png", "folder.jpg", "folder.png", "front.jp
 
 PATTERN_HELP = (
     "Fields: {title} {artist} {album} {albumartist} {year} {date} {genre} {tracknumber} {discnumber} "
-    "{totaltracks} {totaldiscs} {disc_prefix} {composer} {label} {codec} {bitrate} {artist_initial}. "
+    "{totaltracks} {totaldiscs} {disc_prefix} {composer} {label} {codec} {bitrate} {artist_initial}, "
+    "{current_folder} (keep the current folders) and {current_name} (keep the current file name). "
     "Numbers accept format specs, e.g. {tracknumber:02}. Use / for folders."
 )
 
@@ -70,11 +71,20 @@ def template_values(t: Track, various_artists: str = "Various Artists") -> dict:
     return v
 
 
-def render(pattern: str, t: Track, various_artists: str = "Various Artists") -> str:
+def render(pattern: str, t: Track, various_artists: str = "Various Artists", root: str | None = None) -> str:
     values = template_values(t, various_artists)
+    values["current_name"] = Path(t.path).stem
     parts = []
     for comp in pattern.replace("\\", "/").split("/"):
         if not comp:
+            continue
+        if comp == "{current_folder}":
+            # the track's folder path below its library folder, kept as it is
+            try:
+                rel = Path(t.folder).relative_to(root) if root else Path(Path(t.folder).name)
+            except ValueError:
+                rel = Path(Path(t.folder).name)
+            parts.extend(p for p in rel.parts if p not in ("", "."))
             continue
         s = _fmt.vformat(comp, (), values)
         # tidy leftovers of empty fields: "()" "[]" leading/trailing separators
@@ -127,13 +137,14 @@ class _CaseFolder:
         return cur
 
 
-def plan(tracks: list[Track], pattern: str, destination: str, various_artists: str = "Various Artists") -> list[Move]:
+def plan(tracks: list[Track], pattern: str, destination: str, various_artists: str = "Various Artists",
+         taken: set[str] | None = None) -> list[Move]:
     dest = Path(destination)
     folders = _CaseFolder(dest)
-    taken: set[str] = set()
+    taken = taken if taken is not None else set()
     moves = []
     for t in tracks:
-        rel = render(pattern, t, various_artists)
+        rel = render(pattern, t, various_artists, str(dest))
         parts = rel.split("/")
         base = folders.resolve(parts[:-1])
         name = parts[-1]

@@ -262,6 +262,64 @@ class Library:
     def discard(self, ids: list[int]) -> None:
         self.db.delete_proposals(ids)
 
+    def set_new_value(self, ids: list[int], field: str, value: str) -> None:
+        """A manual edit in the "New" column: propose field=value for these tracks (nothing is written yet).
+        Where value equals the file's current value, that field's pending change is dropped instead."""
+        value = value.strip()
+        for t in self.db.tracks(ids):
+            p = self.db.proposal(t.id)
+            tags = dict(p.tags) if p else {}
+            if value == (t.tags.get(field) or "").strip():
+                tags.pop(field, None)
+            else:
+                tags[field] = value
+            if tags or (p and p.art is not None):
+                src = p.source if p and p.source else "Manual edit"
+                if "Manual edit" not in src:
+                    src += ", Manual edit"
+                self.db.set_proposal(Proposal(t.id, tags, p.art if p else None, p.art_source if p else None,
+                                              src, p.score if p and p.tags else 1.0, p.note if p else ""),
+                                     merge=False)
+            elif p:
+                self.db.delete_proposals([t.id])
+
+    def fix_library(self, ids: list[int], task: Task = NULL_TASK, *, lookup: bool = True, artwork: bool = True,
+                    clean: bool = True, skip_identified: bool = True) -> dict[str, int]:
+        """Whole-library pass: clean up, look up tags and find missing artwork, proposing changes only.
+        Nothing is written; the results are reviewed album by album (or folder by folder)."""
+        res = {"cleaned": 0, "identified": 0, "artwork": 0}
+        if clean:
+            res["cleaned"] = self.cleanup(ids, task)
+        if lookup:
+            todo = ids
+            if skip_identified:
+                todo = [t.id for t in self.db.tracks(ids) if not t.tags.get("musicbrainz_recordingid")]
+                task.log(f"Looking up {len(todo)} tracks ({len(ids) - len(todo)} already have MusicBrainz IDs)")
+            if todo:
+                r = self.identify(todo, task)
+                res["identified"] = r.get("matched", 0) if isinstance(r, dict) else 0
+        if artwork:
+            res["artwork"] = self.fetch_artwork(ids, task, only_missing=True)
+        res["waiting"] = len(self.db.proposal_ids() & set(ids))
+        return res
+
+    def review_groups(self, by: str = "album", ids: set[int] | None = None) -> list[tuple[str, list[Track]]]:
+        """Tracks with pending changes, grouped per album (by the new tags) or per folder, in a stable order."""
+        pending = self.db.proposal_ids()
+        if ids is not None:
+            pending &= ids
+        groups: dict[str, list[Track]] = defaultdict(list)
+        for t in self.db.tracks(sorted(pending)):
+            if by == "folder":
+                key = t.folder
+            else:
+                new = {**t.tags, **(self.db.proposal(t.id).tags if self.db.proposal(t.id) else {})}
+                artist = new.get("albumartist") or new.get("artist") or ""
+                key = f"{artist} \u2013 {new['album']}" if new.get("album") else t.folder
+            groups[key].append(t)
+        from .foldertree import album_order
+        return [(k, sorted(v, key=album_order)) for k, v in sorted(groups.items(), key=lambda kv: kv[0].casefold())]
+
     def edit(self, ids: list[int], changes: dict[str, str], art=tagio._KEEP, task: Task = NULL_TASK) -> ApplyResult:
         """Write manual edits immediately (journaled)."""
         res = ApplyResult(batch=self.db.new_batch())
@@ -443,6 +501,14 @@ class Library:
         tracks = self.db.tracks(ids)
         if skip_untagged:
             tracks = [t for t in tracks if not t.error and not cleanup.is_untagged(t)]
+        if "{current_folder}" in pattern:
+            # keep each track where it is: plan per library folder, relative to it
+            by_root: dict[str, list[Track]] = defaultdict(list)
+            for t in tracks:
+                by_root[self._library_root(t.path) or t.folder].append(t)
+            taken: set[str] = set()
+            return [m for root, ts in by_root.items()
+                    for m in organizer.plan(ts, pattern, root, self.settings.various_artists_name, taken)]
         return organizer.plan(tracks, pattern, destination, self.settings.various_artists_name)
 
     def organize(self, moves: list[organizer.Move], copy: bool = False, task: Task = NULL_TASK) -> tuple[int, str]:

@@ -286,14 +286,19 @@ class MusicMaidTUI(TaskMixin, App):
             stack.extend(n.children)
         first = not self._tree_filled
         self._tree_filled = True
-        nodes = foldertree.build(tracks, self.lib.folders)
+        min_art = self.lib.settings.artwork_min_size
+        nodes = foldertree.build(tracks, self.lib.folders, lambda t: problems(t, min_art))
         tree.clear()
         tree.root.set_label(f"All folders ({len(tracks)})")
         tree.root.data = ""
         by_path = {}
 
         def add(parent, node, depth):
-            item = parent.add(f"{node.name} ({node.count})", data=node.path,
+            label = Text(f"{node.name} ({node.count})")
+            if node.flagged:
+                label.append(f" ⚠{node.flagged}", style="bold red")
+                label.stylize("red", 0, len(node.name))
+            item = parent.add(label, data=node.path,
                               expand=node.path in expanded or (first and depth == 0),
                               allow_expand=bool(node.children))
             by_path[node.path] = item

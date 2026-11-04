@@ -109,23 +109,46 @@ apps include and MusicMaid offers to download otherwise.
 
 Only each file's audio fingerprint and length are sent to AcoustID, never the audio itself.
 
-## Typical workflow
+## How to use it
 
-1. **Add folder** → **Scan**. Your music appears as a folder tree on the left: pick a folder to see its
-   tracks in album order, or *All folders* for everything. The views above the tree (*Needs review*,
-   *Untagged*, …) narrow both the tree and the track list.
-2. **Duplicates** → review the groups → *Remove checked copies*.
-3. Select everything → **Auto-tag**. This runs clean-up, identification and artwork; confident results
-   are written, and everything else lands in **Needs review**.
-4. When changes are waiting, a bar above the track list says so. Click **Preview & Apply All**, untick
-   anything you don't want, and write the rest; or open **Needs review** to go through them track by track.
-   Fix leftovers by hand in the tag editor, or try **Tags from Folder Names** (in the Auto-Tag ▾ menu).
-   Under the track list, the **Files** panel shows everything that's really in the chosen folder (covers,
-   `.cue`, `.log`, …). Clicking an audio file selects its track, and double-clicking opens a file. Toggle the
-   panel with **View → Show Files Panel** (F6).
-5. **Split CUE** turns one-file albums into tracks; **Organize** renames and moves files into a clean folder
-   structure. Right-click a track or folder to copy its name or path.
-6. Changed your mind? Use **Undo**.
+Click **Add Folder…** and pick your music folder. Your music shows up as a folder tree on the left, and the
+tracks of the chosen folder appear in the list. Anything that needs fixing is shown **in red**: the
+*Problems* column says what's wrong (no artist, no artwork, low bitrate, …), and folders containing such
+tracks are red with a ⚠ count.
+
+### Fix a few tracks by hand
+
+1. Select the tracks in the list (Shift/Ctrl-click for several, Ctrl+A for all of them).
+2. Click a button in the **Selected tracks** bar: **Look Up Tags** (MusicBrainz/AcoustID), **Find Artwork**,
+   **Clean Up** (capitals, junk text) or **From Folders…** (tags from the folder structure).
+3. On the right, compare **Original** and **New**, cover art included. Changed values are highlighted, and
+   missing ones are red. Double-click a value in the **New** column to type your own.
+4. Click **Apply**. Only the selected tracks are changed, or **Discard Changes** to forget the new values.
+
+### Fix the whole library
+
+1. Click **Fix Whole Library…**. It looks up tags and artwork for all your music (or one folder) and changes
+   nothing yet.
+2. When it's done, it shows the changes **one album at a time** (or one folder at a time; choose in the
+   dialog or in Settings): original vs new for every track and the cover. Untick anything you don't want,
+   then **Apply & Next**, **Skip** or **Discard & Next**.
+3. You can stop at any time; **Review Changes** continues where you left off.
+
+### Rename & organize files and folders
+
+**Rename & Organize** names files and folders from their tags. Pick a folder layout (e.g. *Artist / Album
+(Year)*) and a file name style (e.g. *01 - Title*), check the before/after preview, then click
+**Rename & Move**. You can also keep the current folders and only rename files, or the other way round. It
+works on the selected tracks or the whole library.
+
+### More
+
+* **Duplicates** finds duplicate songs and keeps the best copy.
+* **Split CUE** turns one-file albums into separate tracks.
+* The **Files** panel under the track list shows everything in the chosen folder (covers, `.cue`, `.log`, …);
+  toggle it with F6.
+* Right-click a track or folder to copy its name or path.
+* **Undo** reverses any tag write, rename or removal.
 
 ### Terminal UI keys
 

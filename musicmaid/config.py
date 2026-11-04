@@ -42,6 +42,7 @@ class Settings:
     skipped_update: str = ""  # version the user chose to skip
     # identification
     auto_apply_threshold: float = 0.90  # matches scoring at/above this are auto-accepted
+    review_group: str = "album"  # Fix Whole Library reviews changes per "album" or per "folder"
     prefer_album_releases: bool = True
     prefer_country: str = ""  # e.g. "US", "GB", "" = any
     write_musicbrainz_ids: bool = True

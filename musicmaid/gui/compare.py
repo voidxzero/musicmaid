@@ -1,0 +1,638 @@
+"""Side-by-side "Original | New" comparison (manual work on the selected tracks) and the album-by-album review
+that follows Fix Whole Library."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPixmap
+from PySide6.QtWidgets import (
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QMessageBox, QPushButton, QTableWidget,
+    QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+)
+
+from .. import tags as tagio
+from ..db import Track
+from ..library import Library
+
+# the fields shown in the comparison, in order (the rest of the editable fields follow)
+MAIN_FIELDS = ["title", "artist", "album", "albumartist", "tracknumber", "totaltracks", "discnumber", "date",
+               "genre", "composer"]
+SHOW_FIELDS = MAIN_FIELDS + [f for f in tagio.EDITABLE_FIELDS if f not in MAIN_FIELDS]
+DIFFERENT = "(different values)"
+MISSING = "(missing)"
+REQUIRED = {"title", "artist", "album", "tracknumber"}     # empty ones are problems
+ART_SIZE = 150
+
+
+def _pixmap(data: bytes | None, size: int = ART_SIZE) -> QPixmap:
+    pm = QPixmap()
+    if data:
+        pm.loadFromData(data)
+        pm = pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    return pm
+
+
+class ArtBox(QWidget):
+    """A titled cover-art box; the "New" one accepts dropped images."""
+    dropped = Signal(bytes, str)
+
+    def __init__(self, title: str, accept_drops: bool = False):
+        super().__init__()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        head = QLabel(f"<b>{title}</b>")
+        head.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image = QLabel()
+        self.image.setObjectName("cover")
+        self.image.setFixedSize(ART_SIZE + 6, ART_SIZE + 6)
+        self.image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image.setWordWrap(True)
+        self.caption = QLabel()
+        self.caption.setObjectName("dim")
+        self.caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(head)
+        lay.addWidget(self.image, 0, Qt.AlignmentFlag.AlignHCenter)
+        lay.addWidget(self.caption)
+        self.setAcceptDrops(accept_drops)
+
+    def show_art(self, data: bytes | None, caption: str, empty: str = "No artwork") -> None:
+        if data:
+            self.image.setPixmap(_pixmap(data))
+        else:
+            self.image.setPixmap(QPixmap())
+            self.image.setText(empty)
+        self.caption.setText(caption)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasImage() or e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        md = e.mimeData()
+        if md.hasUrls():
+            for url in md.urls():
+                p = Path(url.toLocalFile())
+                if p.is_file():
+                    self.dropped.emit(p.read_bytes(), f"file {p.name}")
+                    return
+        if md.hasImage():
+            from PySide6.QtCore import QBuffer, QIODevice
+            buf = QBuffer()
+            buf.open(QIODevice.OpenModeFlag.WriteOnly)
+            md.imageData().save(buf, "PNG")
+            self.dropped.emit(bytes(buf.data()), "dropped image")
+
+
+def _common(values: list[str]) -> str:
+    vals = set(values)
+    return next(iter(vals)) if len(vals) == 1 else DIFFERENT
+
+
+# ---------------------------------------------------------------- manual: the selected tracks
+class ComparePanel(QWidget):
+    """Original tags and art on the left, the new (proposed) ones on the right. The New column can be typed in;
+    nothing is written until Apply."""
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        self.lib: Library = win.lib
+        self.tracks: list[Track] = []
+        self._filling = False
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 0, 0, 0)
+
+        self.heading = QLabel()
+        self.heading.setWordWrap(True)
+        self.heading.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(self.heading)
+        self.problems = QLabel()
+        self.problems.setWordWrap(True)
+        self.problems.setObjectName("problems")
+        lay.addWidget(self.problems)
+
+        arts = QHBoxLayout()
+        self.art_old = ArtBox("Original")
+        self.art_new = ArtBox("New", accept_drops=True)
+        self.art_new.dropped.connect(self._set_art)
+        arts.addWidget(self.art_old)
+        arts.addWidget(self.art_new)
+        lay.addLayout(arts)
+        art_btns = QHBoxLayout()
+        art_btns.addStretch(1)
+        b = QPushButton("Find Artwork Online…")
+        b.setToolTip("Pick a cover from the Cover Art Archive, iTunes or Deezer for the selected tracks")
+        b.clicked.connect(win.choose_artwork)
+        art_btns.addWidget(b)
+        b = QPushButton("From File…")
+        b.setToolTip("Use an image file as the new cover (you can also drop an image on the New box)")
+        b.clicked.connect(self._art_from_file)
+        art_btns.addWidget(b)
+        lay.addLayout(art_btns)
+
+        self.table = QTableWidget(len(SHOW_FIELDS), 3)
+        self.table.setHorizontalHeaderLabels(["", "Original", "New"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
+                                   | QAbstractItemView.EditTrigger.SelectedClicked
+                                   | QAbstractItemView.EditTrigger.EditKeyPressed
+                                   | QAbstractItemView.EditTrigger.AnyKeyPressed)
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setDefaultSectionSize(22)
+        for r, f in enumerate(SHOW_FIELDS):
+            lbl = QTableWidgetItem(tagio.FIELD_LABELS[f])
+            lbl.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self.table.setItem(r, 0, lbl)
+        self.table.itemChanged.connect(self._edited)
+        lay.addWidget(self.table, 1)
+
+        self.source = QLabel()
+        self.source.setWordWrap(True)
+        lay.addWidget(self.source)
+        hint = QLabel("Double-click a value in the New column to change it yourself.")
+        hint.setObjectName("dim")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        btns = QHBoxLayout()
+        self.b_discard = QPushButton("Discard Changes")
+        self.b_discard.setToolTip("Forget the new values of the selected tracks (the files aren't touched)")
+        self.b_discard.clicked.connect(win.discard)
+        self.b_apply = QPushButton("Apply")
+        self.b_apply.setObjectName("primary")
+        self.b_apply.setMinimumHeight(30)
+        self.b_apply.clicked.connect(win.apply)
+        btns.addWidget(self.b_discard)
+        btns.addWidget(self.b_apply, 1)
+        lay.addLayout(btns)
+        self.info = QLabel()
+        self.info.setObjectName("dim")
+        self.info.setWordWrap(True)
+        self.info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(self.info)
+        self.show_tracks([])
+
+    # ------------------------------------------------------------ filling
+    def show_tracks(self, tracks: list[Track]) -> None:
+        self.tracks = tracks
+        n = len(tracks)
+        self._filling = True
+        try:
+            self._fill(tracks)
+        finally:
+            self._filling = False
+
+    def _fill(self, tracks: list[Track]) -> None:
+        from .mainwindow import GREEN, RED
+        from ..cleanup import problems as find_problems
+        n = len(tracks)
+        self.table.setEnabled(n > 0)
+        if not tracks:
+            self.heading.setText("<b>Select one or more tracks</b> in the list to see and change their tags.")
+            for r in range(len(SHOW_FIELDS)):
+                for c in (1, 2):
+                    self.table.setItem(r, c, QTableWidgetItem(""))
+            self.art_old.show_art(None, "")
+            self.art_new.show_art(None, "")
+            self.problems.hide()
+            self.source.clear()
+            self.info.clear()
+            self.b_apply.setEnabled(False)
+            self.b_discard.setEnabled(False)
+            self.b_apply.setText("Apply")
+            return
+        props = {t.id: self.lib.db.proposal(t.id) for t in tracks}
+        changed_tracks = sum(1 for p in props.values() if p and (p.tags or p.art is not None))
+        t0 = tracks[0]
+        title = t0.get("title") or t0.filename
+        self.heading.setText(f"<b>{title}</b>" if n == 1 else f"<b>{n} tracks selected</b>")
+        tint = QColor(GREEN)
+        tint.setAlpha(60)
+        red_tint = QColor(RED)
+        red_tint.setAlpha(55)
+        italic = QFont()
+        italic.setItalic(True)
+        # what needs fixing, in red, before anything else
+        counts: dict[str, int] = {}
+        for t in tracks:
+            for pr in find_problems(t, self.lib.settings.artwork_min_size):
+                key = pr.split(" (")[0]
+                counts[key] = counts.get(key, 0) + 1
+        if counts:
+            items = [(k if n == 1 else f"{k} ({c} of {n})") for k, c in counts.items()]
+            self.problems.setText(f"<span style='color:{QColor(RED).name()}'><b>⚠ Needs fixing:</b> "
+                                  + ", ".join(items) + "</span>")
+            self.problems.setStyleSheet(f"QLabel#problems {{ border: 1px solid {QColor(RED).name()}; "
+                                        "border-radius: 3px; padding: 4px; }")
+            self.problems.show()
+        else:
+            self.problems.hide()
+        bold = QFont()
+        bold.setBold(True)
+        changes = 0
+        for r, f in enumerate(SHOW_FIELDS):
+            olds = [t.tags.get(f, "") for t in tracks]
+            news = [(props[t.id].tags[f] if props[t.id] and f in props[t.id].tags else t.tags.get(f, ""))
+                    for t in tracks]
+            old, new = _common(olds), _common(news)
+            o = QTableWidgetItem(old)
+            o.setFlags(Qt.ItemFlag.ItemIsEnabled)          # the Original column is read-only
+            o.setForeground(self.palette().color(self.palette().ColorRole.PlaceholderText))
+            label = self.table.item(r, 0)
+            label.setForeground(self.palette().color(self.palette().ColorRole.WindowText))
+            if f in REQUIRED and any(not v for v in olds):
+                o.setText(MISSING if all(not v for v in olds) else old)
+                o.setForeground(QColor(RED))
+                o.setFont(italic)
+                label.setForeground(QColor(RED))
+            nw = QTableWidgetItem(new)
+            nw.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsEditable | Qt.ItemFlag.ItemIsSelectable)
+            nw.setData(Qt.ItemDataRole.UserRole, f)
+            differs = olds != news
+            if differs:
+                changes += 1
+                nw.setBackground(tint)
+                nw.setFont(bold)
+                nw.setToolTip("Changed. Apply writes this to the file" + ("s" if n > 1 else ""))
+            if f in REQUIRED and any(not v for v in news):
+                nw.setBackground(red_tint)
+                nw.setToolTip("Still missing: double-click to type it, or use Look Up Tags")
+            self.table.setItem(r, 1, o)
+            self.table.setItem(r, 2, nw)
+        # artwork
+        old_art = tagio.read_artwork(t0.path) if t0.has_art else None
+        small = old_art is not None and min(old_art.width, old_art.height) < self.lib.settings.artwork_min_size
+        red = QColor(RED).name()
+        self.art_old.show_art(old_art.data if old_art else None,
+                              f"<span style='color:{red}'>{old_art.width}×{old_art.height} - too small</span>"
+                              if small else (f"{old_art.width}×{old_art.height}" if old_art else
+                                             f"<span style='color:{red}'><b>No artwork</b></span>"),
+                              "No artwork")
+        p0 = props[t0.id]
+        if p0 and p0.art is not None:
+            _, w, h = tagio.image_info(p0.art)
+            self.art_new.show_art(p0.art, f"{w}×{h} · {p0.art_source or 'new'}")
+            changes += 1
+        else:
+            self.art_new.show_art(old_art.data if old_art else None,
+                                  "unchanged" if old_art else "", "Drop an image here")
+        # source and buttons
+        with_p = [p for p in props.values() if p]
+        if with_p:
+            p = with_p[0]
+            note = f" · {p.note}" if p.note else ""
+            conf = f" · {p.score:.0%} sure" if p.tags else ""
+            self.source.setText(f"New values from <b>{p.source}</b>{conf}{note}")
+        else:
+            self.source.setText("No changes yet. Use <b>Look Up Tags</b>, <b>Find Artwork</b> or "
+                                "<b>Clean Up</b> above, or type a new value.")
+        self.b_apply.setEnabled(changed_tracks > 0)
+        self.b_discard.setEnabled(changed_tracks > 0)
+        self.b_apply.setText("Apply" if n == 1 else f"Apply to {changed_tracks} Track"
+                             + ("s" if changed_tracks != 1 else ""))
+        if n == 1:
+            m, s = divmod(int(t0.duration), 60)
+            self.info.setText(f"{t0.path}\n{t0.codec} · {'lossless' if t0.lossless else f'{t0.bitrate} kbps'}"
+                              f" · {t0.sample_rate / 1000:g} kHz · {m}:{s:02d}")
+        else:
+            self.info.setText(f"{changed_tracks} of {n} selected tracks have changes")
+
+    # ------------------------------------------------------------ editing
+    def _edited(self, item: QTableWidgetItem) -> None:
+        if self._filling or item.column() != 2 or not self.tracks:
+            return
+        field = item.data(Qt.ItemDataRole.UserRole)
+        value = item.text()
+        if value == DIFFERENT:
+            return
+        self.lib.set_new_value([t.id for t in self.tracks], field, value)
+        self.win.refresh_tracks()
+
+    def _set_art(self, data: bytes, label: str) -> None:
+        if self.tracks:
+            self.win.propose_art([t.id for t in self.tracks], data, label)
+
+    def _art_from_file(self) -> None:
+        if not self.tracks:
+            return
+        p, _ = QFileDialog.getOpenFileName(self, "Choose image", str(Path.home()),
+                                           "Images (*.jpg *.jpeg *.png *.webp)")
+        if p:
+            self._set_art(Path(p).read_bytes(), f"file {Path(p).name}")
+
+
+# ---------------------------------------------------------------- whole library: options
+class FixLibraryDialog(QDialog):
+    def __init__(self, lib: Library, folder: str | None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Fix Whole Library")
+        self.setMinimumWidth(560)
+        lay = QVBoxLayout(self)
+        intro = QLabel("MusicMaid goes through your music, looks up tags and finds missing artwork. "
+                       "<b>Nothing is changed yet</b>: when it's done, you review the changes "
+                       f"{'album' if lib.settings.review_group != 'folder' else 'folder'} by "
+                       f"{'album' if lib.settings.review_group != 'folder' else 'folder'} and apply the ones "
+                       "you want. Looking up a large library can take a while (MusicBrainz allows about one "
+                       "lookup per second); you can stop and continue the review later.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        form = QFormLayout()
+        self.scope = QComboBox()
+        self.scope.addItem("The whole library", "")
+        if folder:
+            self.scope.addItem(f"Only {Path(folder).name}", folder)
+        form.addRow("Work on", self.scope)
+        self.lookup = QCheckBox("Look up tags online (MusicBrainz / AcoustID)")
+        self.lookup.setChecked(True)
+        self.artwork = QCheckBox("Find missing artwork")
+        self.artwork.setChecked(True)
+        self.clean = QCheckBox("Clean up text (capitals, junk like URLs, empty fields from file names)")
+        self.clean.setChecked(True)
+        self.skip = QCheckBox("Skip tracks that were already looked up (have MusicBrainz IDs) - much faster")
+        self.skip.setChecked(True)
+        for cb in (self.lookup, self.artwork, self.clean, self.skip):
+            form.addRow("", cb)
+        self.group = QComboBox()
+        self.group.addItem("Album by album", "album")
+        self.group.addItem("Folder by folder", "folder")
+        self.group.setCurrentIndex(1 if lib.settings.review_group == "folder" else 0)
+        form.addRow("Review the changes", self.group)
+        lay.addLayout(form)
+        buttons = QDialogButtonBox()
+        go = buttons.addButton("Start", QDialogButtonBox.ButtonRole.AcceptRole)
+        go.setObjectName("primary")
+        buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def options(self) -> dict:
+        return {"folder": self.scope.currentData() or None, "lookup": self.lookup.isChecked(),
+                "artwork": self.artwork.isChecked(), "clean": self.clean.isChecked(),
+                "skip_identified": self.skip.isChecked(), "group": self.group.currentData()}
+
+
+# ---------------------------------------------------------------- whole library: review one group at a time
+class ReviewWizard(QDialog):
+    """Steps through the pending changes one album (or folder) at a time: Apply & Next, Skip, Discard & Next."""
+
+    def __init__(self, lib: Library, parent=None, by: str | None = None, ids: set[int] | None = None):
+        super().__init__(parent)
+        self.lib = lib
+        self.by = by or lib.settings.review_group
+        self.setWindowTitle("Review Changes")
+        self.resize(1050, 720)
+        self.groups = lib.review_groups(self.by, ids)
+        self.pos = 0
+        self.stats = {"applied": 0, "skipped": 0, "discarded": 0, "tracks": 0}
+        self.batches: list[str] = []
+
+        lay = QVBoxLayout(self)
+        top = QHBoxLayout()
+        self.counter = QLabel()
+        self.counter.setObjectName("dim")
+        self.title = QLabel()
+        self.title.setWordWrap(True)
+        top.addWidget(self.title, 1)
+        top.addWidget(self.counter)
+        lay.addLayout(top)
+
+        mid = QHBoxLayout()
+        arts = QVBoxLayout()
+        self.art_old = ArtBox("Original")
+        self.art_new = ArtBox("New")
+        arts.addWidget(self.art_old)
+        arts.addWidget(self.art_new)
+        arts.addStretch(1)
+        mid.addLayout(arts)
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(3)
+        self.tree.setHeaderLabels(["", "Original", "New"])
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setUniformRowHeights(True)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.tree.setColumnWidth(0, 230)
+        mid.addWidget(self.tree, 1)
+        lay.addLayout(mid, 1)
+        self.note = QLabel()
+        self.note.setWordWrap(True)
+        self.note.setObjectName("dim")
+        lay.addWidget(self.note)
+
+        btns = QHBoxLayout()
+        self.b_back = QPushButton("◀ Back")
+        self.b_back.clicked.connect(lambda: self._go(-1))
+        self.b_stop = QPushButton("Stop for Now")
+        self.b_stop.setToolTip("Close; the remaining changes stay in Needs review for later")
+        self.b_stop.clicked.connect(self.accept)
+        self.b_discard = QPushButton("Discard && Next")
+        self.b_discard.setToolTip("Throw away this album's changes (the files aren't touched)")
+        self.b_discard.clicked.connect(self._discard)
+        self.b_skip = QPushButton("Skip")
+        self.b_skip.setToolTip("Decide later: the changes stay in Needs review")
+        self.b_skip.clicked.connect(self._skip)
+        self.b_apply = QPushButton("Apply && Next ▶")
+        self.b_apply.setObjectName("primary")
+        self.b_apply.setMinimumHeight(30)
+        self.b_apply.clicked.connect(self._apply)
+        btns.addWidget(self.b_back)
+        btns.addWidget(self.b_stop)
+        btns.addStretch(1)
+        btns.addWidget(self.b_discard)
+        btns.addWidget(self.b_skip)
+        btns.addWidget(self.b_apply)
+        lay.addLayout(btns)
+        self.tree.itemChanged.connect(lambda *_: self._count())
+        self._show()
+
+    # ------------------------------------------------------------ one group
+    def _show(self) -> None:
+        if not self.groups:
+            self.title.setText("<h3>Nothing to review</h3>No tracks have changes waiting.")
+            for b in (self.b_back, self.b_discard, self.b_skip, self.b_apply):
+                b.setEnabled(False)
+            self.counter.clear()
+            return
+        if self.pos >= len(self.groups):
+            self._finish()
+            return
+        name, tracks = self.groups[self.pos]
+        # tracks may have been handled meanwhile (applied/discarded elsewhere)
+        pending = self.lib.db.proposal_ids()
+        tracks = [t for t in self.lib.tracks([t.id for t in tracks]) if t.id in pending]
+        if not tracks:
+            self.pos += 1
+            self._show()
+            return
+        self.cur = tracks
+        unit = "folder" if self.by == "folder" else "album"
+        self.counter.setText(f"{self.pos + 1} of {len(self.groups)}")
+        shown = f"Folder: {Path(name).name}" if Path(name).is_absolute() else name
+        self.title.setText(f"<h3 style='margin:0'>{shown}</h3>{len(tracks)} track{'s' if len(tracks) != 1 else ''}"
+                           f" with changes · {Path(tracks[0].folder)}")
+        self.b_back.setEnabled(self.pos > 0)
+        props = {t.id: self.lib.db.proposal(t.id) for t in tracks}
+        self.tree.blockSignals(True)
+        self.tree.clear()
+        bold = QFont()
+        bold.setBold(True)
+
+        def check(item: QTreeWidgetItem, data) -> None:
+            item.setData(0, Qt.ItemDataRole.UserRole, data)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.CheckState.Checked)
+            item.setFont(2, bold)
+
+        # changes that are the same for every track (album, album artist, year, …) are shown once
+        fields = [f for f in tagio.FIELD_NAMES if any(props[t.id] and f in props[t.id].tags for t in tracks)]
+        shared, per_track = [], []
+        for f in fields:
+            pairs = {((t.tags.get(f) or ""), (props[t.id].tags.get(f, t.tags.get(f) or "") if props[t.id] else
+                                              t.tags.get(f) or "")) for t in tracks}
+            changed_all = all(props[t.id] and f in props[t.id].tags and
+                              (props[t.id].tags[f] or "") != (t.tags.get(f) or "") for t in tracks)
+            (shared if len(pairs) == 1 and changed_all and len(tracks) > 1 else per_track).append(f)
+        if shared:
+            head = QTreeWidgetItem([f"Whole {unit}", "", ""])
+            head.setFlags(head.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
+            for f in shared:
+                old = tracks[0].tags.get(f) or "(empty)"
+                new = props[tracks[0].id].tags[f] or "(remove)"
+                it = QTreeWidgetItem([tagio.FIELD_LABELS.get(f, f), old, new])
+                check(it, ("*", f))
+                head.addChild(it)
+            head.setCheckState(0, Qt.CheckState.Checked)
+            self.tree.addTopLevelItem(head)
+        same_art = self._same_art_everywhere(props)
+        for t in tracks:
+            p = props[t.id]
+            rows = []
+            for f in per_track:
+                if p and f in p.tags and (p.tags[f] or "") != (t.tags.get(f) or ""):
+                    rows.append(QTreeWidgetItem([tagio.FIELD_LABELS.get(f, f), t.tags.get(f) or "(empty)",
+                                                 p.tags[f] or "(remove)"]))
+                    check(rows[-1], (t.id, f))
+            if p and p.art is not None and not same_art:
+                _, w, h = tagio.image_info(p.art)
+                rows.append(QTreeWidgetItem(["Cover art", f"{t.art_w}×{t.art_h}" if t.has_art else "(none)",
+                                             f"{w}×{h}"]))
+                check(rows[-1], (t.id, "__art__"))
+            if not rows:
+                continue
+            num = (t.tags.get("tracknumber") or "").split("/")[0]
+            label = f"{num + '. ' if num else ''}{p.tags.get('title') if p and p.tags.get('title') else t.get('title') or t.filename}"
+            top = QTreeWidgetItem([label, "", ""])
+            top.setToolTip(0, t.path)
+            top.setFlags(top.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
+            for r in rows:
+                top.addChild(r)
+            top.setCheckState(0, Qt.CheckState.Checked)
+            self.tree.addTopLevelItem(top)
+        # artwork, shown once when the whole group gets the same new cover
+        old_art = next((tagio.read_artwork(t.path) for t in tracks if t.has_art), None)
+        self.art_old.show_art(old_art.data if old_art else None,
+                              f"{old_art.width}×{old_art.height}" if old_art else "", "No artwork")
+        new_art = next((props[t.id].art for t in tracks if props[t.id] and props[t.id].art is not None), None)
+        self.art_new_check = None
+        if new_art and same_art:
+            _, w, h = tagio.image_info(new_art)
+            self.art_new.show_art(new_art, f"{w}×{h}")
+            item = QTreeWidgetItem(["Cover art (all tracks)", f"{old_art.width}×{old_art.height}" if old_art
+                                    else "(none)", f"{w}×{h} · {props[tracks[0].id].art_source or ''}"])
+            check(item, ("*", "__art__"))
+            self.tree.insertTopLevelItem(0, item)
+        elif new_art:
+            self.art_new.show_art(new_art, "differs per track")
+        else:
+            self.art_new.show_art(old_art.data if old_art else None, "unchanged" if old_art else "", "No artwork")
+        self.tree.expandAll()
+        self.tree.blockSignals(False)
+        srcs = sorted({s for p in props.values() if p for s in p.source.split(", ") if s})
+        scores = [p.score for p in props.values() if p and p.tags]
+        self.note.setText(f"Changes from {', '.join(srcs)}" + (f" · confidence {min(scores):.0%}–{max(scores):.0%}"
+                                                              if scores else "")
+                          + ". Untick anything you don't want; unticked changes stay in Needs review.")
+        self._count()
+
+    @staticmethod
+    def _same_art_everywhere(props) -> bool:
+        arts = [p.art for p in props.values() if p and p.art is not None]
+        return bool(arts) and len(arts) == len(props) and all(a == arts[0] for a in arts)
+
+    def _leaves(self):
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            if top.childCount():
+                for j in range(top.childCount()):
+                    yield top.child(j)
+            else:
+                yield top
+
+    def _count(self) -> None:
+        on = sum(1 for it in self._leaves() if it.checkState(0) == Qt.CheckState.Checked)
+        self.b_apply.setText(f"Apply {on} Change{'s' if on != 1 else ''} && Next ▶" if on else "Next ▶")
+
+    # ------------------------------------------------------------ actions
+    def _selection(self) -> tuple[list[int], dict[int, set[str]]]:
+        ids = [t.id for t in self.cur]
+        exclude: dict[int, set[str]] = {}
+        for it in self._leaves():
+            tid, field = it.data(0, Qt.ItemDataRole.UserRole)
+            if it.checkState(0) != Qt.CheckState.Checked:
+                for t in (ids if tid == "*" else [tid]):
+                    exclude.setdefault(t, set()).add(field)
+        # fields not shown at all (e.g. unchanged values) don't matter; tracks with nothing ticked are skipped
+        return ids, exclude
+
+    def _apply(self) -> None:
+        ids, exclude = self._selection()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            res = self.lib.apply(ids, exclude=exclude, label=f"Review: {self.groups[self.pos][0]}")
+        finally:
+            QApplication.restoreOverrideCursor()
+        if res.failed:
+            QMessageBox.warning(self, "Review", f"{res.failed} file(s) couldn't be written (see the log). "
+                                "Their changes stay in Needs review.")
+        self.batches.append(res.batch)
+        self.stats["applied"] += 1
+        self.stats["tracks"] += res.written
+        self._go(1)
+
+    def _skip(self) -> None:
+        self.stats["skipped"] += 1
+        self._go(1)
+
+    def _discard(self) -> None:
+        self.lib.discard([t.id for t in self.cur])
+        self.stats["discarded"] += 1
+        self._go(1)
+
+    def _go(self, step: int) -> None:
+        self.pos = max(0, self.pos + step)
+        self._show()
+
+    def _finish(self) -> None:
+        s = self.stats
+        self.tree.clear()
+        self.art_old.show_art(None, "")
+        self.art_new.show_art(None, "")
+        self.counter.clear()
+        self.title.setText(f"<h3>All done</h3>Applied changes to {s['tracks']} tracks in {s['applied']} "
+                           f"{'folders' if self.by == 'folder' else 'albums'}; skipped {s['skipped']}, discarded "
+                           f"{s['discarded']}. Skipped changes are still in <i>Needs review</i>. "
+                           "Everything applied can be undone with Undo.")
+        self.note.clear()
+        for b in (self.b_discard, self.b_skip, self.b_back):
+            b.setEnabled(False)
+        self.b_apply.setText("Close")
+        self.b_apply.clicked.disconnect()
+        self.b_apply.clicked.connect(self.accept)

@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSettings, QSortFilterProxyModel, Qt, QTimer
-from PySide6.QtGui import QAction, QBrush, QColor, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDockWidget, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
@@ -26,7 +26,7 @@ from . import skins
 from .workers import TaskRunner, background
 
 COLUMNS = [
-    ("state", "Status"), ("artist", "Artist"), ("title", "Title"), ("album", "Album"), ("albumartist", "Album Artist"),
+    ("state", "Status"), ("problems", "Problems"), ("artist", "Artist"), ("title", "Title"), ("album", "Album"), ("albumartist", "Album Artist"),
     ("tracknumber", "#"), ("date", "Year"), ("genre", "Genre"), ("format", "Format"), ("duration", "Length"),
     ("path", "File"),
 ]
@@ -75,12 +75,11 @@ class TrackModel(QAbstractTableModel):
             return "Error", RED, f"Can't read this file: {t.error}"
         if t.id in self.pending:
             src, score, art = self.pending[t.id]
-            ok = score >= self.lib.settings.auto_apply_threshold
-            return "Review", GREEN if ok else AMBER, (f"Changes proposed by {src} (confidence {score:.0%}) - "
-                                                      "select it to see them, then Apply or Discard")
+            return "New", GREEN, (f"New values from {src} ({score:.0%} sure) - select the track to compare "
+                                  "Original and New, then Apply or Discard")
         probs = problems(t, self.lib.settings.artwork_min_size)
         if probs:
-            return "Check", AMBER, "Problems: " + ", ".join(probs)
+            return "Fix", RED, "Needs fixing: " + ", ".join(probs)
         return "OK", GREEN, "Tags look complete"
 
     def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
@@ -91,6 +90,10 @@ class TrackModel(QAbstractTableModel):
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
             if key == "state":
                 return self._state(t)[0]
+            if key == "problems":
+                return ", ".join(problems(t, self.lib.settings.artwork_min_size))
+            if key in ("artist", "album") and not t.get(key) and not t.error:
+                return "missing"
             if key == "format":
                 return f"{t.codec} " + ("lossless" if t.lossless else f"{t.bitrate}k")
             if key == "duration":
@@ -106,9 +109,19 @@ class TrackModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ForegroundRole:
             if key == "state":
                 return QBrush(self._state(t)[1])
+            if key == "problems" or (key in ("artist", "album") and not t.get(key)):
+                return QBrush(RED)
             if key == "title" and not t.get("title"):
-                return QBrush(DIM)
-        if role == Qt.ItemDataRole.ToolTipRole and key == "state":
+                return QBrush(RED)
+        if role == Qt.ItemDataRole.FontRole and (key == "state" or (key in ("artist", "album", "title")
+                                                                      and not t.get(key))):
+            f = QFont()
+            if key == "state":
+                f.setBold(True)
+            else:
+                f.setItalic(True)
+            return f
+        if role == Qt.ItemDataRole.ToolTipRole and key in ("state", "problems"):
             return self._state(t)[2]
         if role == Qt.ItemDataRole.UserRole:  # sort key
             if key == "tracknumber":
@@ -143,214 +156,6 @@ class FilterProxy(QSortFilterProxyModel):
 
 
 # ---------------------------------------------------------------- details panel
-class ArtLabel(QLabel):
-    """Shows cover art; accepts dropped image files."""
-
-    def __init__(self, on_drop):
-        super().__init__()
-        self.on_drop = on_drop
-        self.setAcceptDrops(True)
-        self.setFixedSize(260, 260)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setText("No artwork\n\n(drop an image here)")
-
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls() or e.mimeData().hasImage():
-            e.acceptProposedAction()
-
-    def dropEvent(self, e):
-        for url in e.mimeData().urls():
-            p = Path(url.toLocalFile())
-            if p.is_file():
-                self.on_drop(p.read_bytes(), f"file {p.name}")
-                return
-
-
-class DetailPanel(QWidget):
-    def __init__(self, win: "MainWindow"):
-        super().__init__()
-        self.win = win
-        self.tracks: list[Track] = []
-        lay = QVBoxLayout(self)
-
-        self.art = ArtLabel(self._dropped_art)
-        self.art_info = QLabel()
-        self.art_info.setWordWrap(True)
-        self.art_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        art_btns = QHBoxLayout()
-        b_choose = QPushButton("Find artwork…")
-        b_choose.clicked.connect(win.choose_artwork)
-        b_file = QPushButton("From file…")
-        b_file.clicked.connect(self._art_from_file)
-        b_remove = QPushButton("Remove")
-        b_remove.clicked.connect(self._remove_art)
-        for b in (b_choose, b_file, b_remove):
-            art_btns.addWidget(b)
-        lay.addWidget(self.art, 0, Qt.AlignmentFlag.AlignHCenter)
-        lay.addWidget(self.art_info)
-        lay.addLayout(art_btns)
-
-        self.proposal = QLabel()
-        self.proposal.setWordWrap(True)
-        self.proposal.setTextFormat(Qt.TextFormat.RichText)
-        lay.addWidget(self.proposal)
-        prow = QHBoxLayout()
-        self.b_apply = QPushButton("Apply proposed changes")
-        self.b_apply.clicked.connect(win.apply)
-        self.b_discard = QPushButton("Discard")
-        self.b_discard.clicked.connect(win.discard)
-        prow.addWidget(self.b_apply)
-        prow.addWidget(self.b_discard)
-        lay.addLayout(prow)
-
-        form_w = QWidget()
-        self.form = QFormLayout(form_w)
-        self.form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        self.edits: dict[str, QLineEdit] = {}
-        for f in tagio.EDITABLE_FIELDS:
-            e = QLineEdit()
-            e.textEdited.connect(lambda _=None, f=f: self._edited(f))
-            self.edits[f] = e
-            self.form.addRow(tagio.FIELD_LABELS[f], e)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(form_w)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        lay.addWidget(scroll, 1)
-
-        save_row = QHBoxLayout()
-        self.b_save = QPushButton("Save tags")
-        self.b_save.setEnabled(False)
-        self.b_save.clicked.connect(self._save)
-        self.b_revert = QPushButton("Revert")
-        self.b_revert.clicked.connect(lambda: self.show_tracks(self.tracks))
-        save_row.addStretch(1)
-        save_row.addWidget(self.b_revert)
-        save_row.addWidget(self.b_save)
-        lay.addLayout(save_row)
-        self.info = QLabel()
-        self.info.setWordWrap(True)
-        self.info.setObjectName("dim")
-        self.info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        lay.addWidget(self.info)
-        self.dirty: set[str] = set()
-        self.show_tracks([])
-
-    def show_tracks(self, tracks: list[Track]) -> None:
-        self.tracks = tracks
-        self.dirty.clear()
-        self.b_save.setEnabled(False)
-        lib = self.win.lib
-        n = len(tracks)
-        for e in self.edits.values():
-            e.setEnabled(n > 0)
-        if not tracks:
-            for e in self.edits.values():
-                e.clear()
-                e.setPlaceholderText("")
-            self.art.setPixmap(QPixmap())
-            self.art.setText("No track selected")
-            self.art_info.clear()
-            self.proposal.clear()
-            self.info.clear()
-            self.b_apply.setVisible(False)
-            self.b_discard.setVisible(False)
-            return
-        props = {t.id: lib.db.proposal(t.id) for t in tracks}
-        for f, e in self.edits.items():
-            values = {t.tags.get(f, "") for t in tracks}
-            proposed = {(props[t.id].tags.get(f) if props[t.id] and f in props[t.id].tags else None) for t in tracks}
-            e.setStyleSheet("")
-            e.setToolTip("")
-            if proposed != {None}:
-                new_vals = {p for p in proposed if p is not None}
-                old = ", ".join(sorted(v for v in values if v)) or "(empty)"
-                e.setStyleSheet(f"QLineEdit {{ background: rgba({GREEN.red()},{GREEN.green()},{GREEN.blue()},0.22); }}")
-                e.setToolTip(f"Proposed change (not saved yet). Current: {old}")
-                e.setText(next(iter(new_vals)) if len(new_vals) == 1 else "")
-                e.setPlaceholderText("<different proposals>" if len(new_vals) > 1 else "")
-            elif len(values) == 1:
-                e.setText(next(iter(values)))
-                e.setPlaceholderText("")
-            else:
-                e.clear()
-                e.setPlaceholderText("<multiple values — leave empty to keep>")
-        # proposal summary
-        with_p = [p for p in props.values() if p]
-        self.b_apply.setVisible(bool(with_p))
-        self.b_discard.setVisible(bool(with_p))
-        if with_p:
-            p = with_p[0]
-            col = "#2ea043" if p.score >= lib.settings.auto_apply_threshold else "#d29922"
-            txt = (f"<b style='color:{col}'>Proposed by {p.source} — confidence {p.score:.0%}</b>"
-                   + (f"<br><i>{p.note}</i>" if p.note else ""))
-            if n > 1:
-                txt += f"<br>{len(with_p)} of {n} selected tracks have proposals."
-            self.proposal.setText(txt)
-        else:
-            self.proposal.setText("")
-        # artwork: proposed art first, else embedded art of the first track
-        t = tracks[0]
-        prop_art = props[t.id].art if props[t.id] and props[t.id].art else None
-        data, label = None, ""
-        if prop_art:
-            data = prop_art
-            _, w, h = tagio.image_info(prop_art)
-            label = f"<b style='color:#2ea043'>New artwork {w}×{h}</b><br>{props[t.id].art_source or ''}"
-        elif t.has_art:
-            art = tagio.read_artwork(t.path)
-            if art:
-                data = art.data
-                label = f"{art.width}×{art.height}"
-        if data:
-            pm = QPixmap()
-            pm.loadFromData(data)
-            self.art.setPixmap(pm.scaled(256, 256, Qt.AspectRatioMode.KeepAspectRatio,
-                                         Qt.TransformationMode.SmoothTransformation))
-        else:
-            self.art.setPixmap(QPixmap())
-            self.art.setText("No artwork\n\n(drop an image here)")
-        self.art_info.setText(label)
-        if n == 1:
-            m, s = divmod(int(t.duration), 60)
-            probs = problems(t, lib.settings.artwork_min_size)
-            self.info.setText(f"{t.path}\n{t.codec} · {'lossless' if t.lossless else f'{t.bitrate} kbps'} · "
-                              f"{t.sample_rate / 1000:g} kHz · {m}:{s:02d}"
-                              + (f"\nProblems: {', '.join(probs)}" if probs else ""))
-        else:
-            self.info.setText(f"{n} tracks selected")
-
-    def _edited(self, f: str) -> None:
-        self.dirty.add(f)
-        self.b_save.setEnabled(True)
-
-    def _save(self) -> None:
-        changes = {f: self.edits[f].text().strip() for f in self.dirty}
-        if len(self.tracks) > 1:
-            # empty field in multi-edit means "keep" unless the user really typed something
-            changes = {k: v for k, v in changes.items() if v}
-        if changes:
-            self.win.save_edits([t.id for t in self.tracks], changes)
-
-    def _dropped_art(self, data: bytes, label: str) -> None:
-        self.win.propose_art([t.id for t in self.tracks], data, label)
-
-    def _art_from_file(self) -> None:
-        if not self.tracks:
-            return
-        p, _ = QFileDialog.getOpenFileName(self, "Choose image", str(Path.home()), "Images (*.jpg *.jpeg *.png *.webp)")
-        if p:
-            self._dropped_art(Path(p).read_bytes(), f"file {Path(p).name}")
-
-    def _remove_art(self) -> None:
-        if self.tracks and QMessageBox.question(self, "Remove artwork",
-                                                f"Remove embedded artwork from {len(self.tracks)} file(s)?") \
-                == QMessageBox.StandardButton.Yes:
-            self.win.run("Removing artwork…", lambda task: self.win.lib.edit(
-                [t.id for t in self.tracks], {}, None, task), lambda r: self.win.reload())
-
-
 # ---------------------------------------------------------------- main window
 class MainWindow(QMainWindow):
     def __init__(self, lib: Library | None = None):
@@ -411,7 +216,7 @@ class MainWindow(QMainWindow):
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hdr.setStretchLastSection(True)
-        for i, w in enumerate([62, 170, 230, 190, 150, 40, 50, 100, 100, 55]):
+        for i, w in enumerate([58, 170, 160, 210, 170, 130, 40, 50, 90, 100, 55]):
             self.table.setColumnWidth(i, w)
         self.table.selectionModel().selectionChanged.connect(lambda *_: self._sel_timer.start())
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -431,15 +236,13 @@ class MainWindow(QMainWindow):
         bl.setContentsMargins(8, 4, 8, 4)
         self.banner_text = QLabel()
         self.banner_text.setWordWrap(True)
-        self.b_review = QPushButton("Show Them")
-        self.b_review.clicked.connect(lambda: self.show_view("review"))
-        self.b_apply_all = QPushButton("Preview && Apply All…")
-        self.b_apply_all.setObjectName("primary")
-        self.b_apply_all.clicked.connect(self.apply_all)
+        self.b_review = QPushButton("Review Album by Album…")
+        self.b_review.setObjectName("primary")
+        self.b_review.clicked.connect(lambda: self.review())
         self.b_discard_all = QPushButton("Discard All…")
         self.b_discard_all.clicked.connect(self.discard_all)
         bl.addWidget(self.banner_text, 1)
-        for b in (self.b_review, self.b_apply_all, self.b_discard_all):
+        for b in (self.b_review, self.b_discard_all):
             bl.addWidget(b)
         self.banner.hide()
 
@@ -458,7 +261,10 @@ class MainWindow(QMainWindow):
         table_page = QWidget()
         cl = QVBoxLayout(table_page)
         cl.setContentsMargins(0, 0, 0, 0)
+        self.sel_bar = QToolBar("Selected tracks")
+        self.sel_bar.setObjectName("selection-bar")
         cl.addWidget(self.search)
+        cl.addWidget(self.sel_bar)
         cl.addWidget(self.banner)
         cl.addWidget(self.vsplit, 1)
 
@@ -469,13 +275,14 @@ class MainWindow(QMainWindow):
         title = QLabel(f"<h2>Welcome to {APP_NAME}</h2>")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         steps = QLabel(
-            "<p>Tidy up your music library in a few steps:</p>"
-            "<ol><li><b>Add your music folder.</b> Nothing on disk changes until you say so.</li>"
-            "<li><b>Auto-Tag</b> fixes tags and finds cover art. Confident results are written, "
-            "the rest waits in <i>Needs review</i>.</li>"
-            "<li>Check the proposed changes, then <b>Apply</b> or <b>Discard</b> them.</li>"
-            "<li>Optionally remove <b>Duplicates</b>, split <b>CUE</b> albums and <b>Organize</b> files "
-            "into tidy folders.</li></ol><p>Every change can be undone.</p>")
+            "<p>Two ways to tidy up your music:</p>"
+            "<p><b>Fix everything at once:</b> add your music folder, click <b>Fix Whole Library</b>, then go "
+            "through the suggested changes album by album and click <b>Apply</b> on the ones you like.</p>"
+            "<p><b>Fix a few tracks by hand:</b> select them in the list, click <b>Look Up Tags</b> or "
+            "<b>Find Artwork</b>, compare <i>Original</i> and <i>New</i> on the right (you can type in New "
+            "too), then click <b>Apply</b>. Only the selected tracks change.</p>"
+            "<p><b>Rename &amp; Organize</b> then names files and folders from their tags. Nothing on disk "
+            "changes until you apply it, and every change can be undone.</p>")
         steps.setWordWrap(True)
         steps.setFixedWidth(560)
         steps.setMinimumHeight(steps.heightForWidth(560) + 40)
@@ -495,7 +302,8 @@ class MainWindow(QMainWindow):
         center.addWidget(table_page)
         self.center = center
 
-        self.detail = DetailPanel(self)
+        from .compare import ComparePanel
+        self.detail = ComparePanel(self)
         detail_scroll = QScrollArea()
         detail_scroll.setWidgetResizable(True)
         detail_scroll.setWidget(self.detail)
@@ -556,59 +364,60 @@ class MainWindow(QMainWindow):
         self.a_add = self._act("Add Folder…", self.add_folder, "Ctrl+O", P.SP_DirOpenIcon, "Add a music folder to the library")
         self.a_scan = self._act("Rescan", self.scan, "F5", P.SP_BrowserReload,
                                 "Look for new, changed and deleted files in your library folders")
-        self.a_auto = self._act("Auto-Tag", self.auto_tag, "Ctrl+T", P.SP_MediaPlay,
-                                "Clean up, identify online and fetch artwork; confident results are written automatically")
-        self.a_ident = self._act("Identify Online", self.identify, "Ctrl+I", P.SP_FileDialogContentsView,
-                                 "Look up tracks on MusicBrainz / AcoustID (proposes changes for review)")
-        self.a_clean = self._act("Clean Up Tags", self.cleanup, "Ctrl+L", P.SP_DialogResetButton,
-                                 "Fix capitalisation and junk text, fill empty tags from file names (proposes changes)")
-        self.a_paths = self._act("Tags from Folder Names…", self.tags_from_paths, "Ctrl+Shift+F", P.SP_DirIcon,
-                                 "Fill in tags from the folder structure, e.g. Artist/Album (Year)/01 - Title")
+        # --- work on the selected tracks (the bar above the track list)
+        self.a_ident = self._act("Look Up Tags", self.identify, "Ctrl+I", P.SP_FileDialogContentsView,
+                                 "Look up the selected tracks on MusicBrainz (and AcoustID) - shows the result in "
+                                 "the New column; nothing is written until you click Apply")
         self.a_art = self._act("Find Artwork", self.fetch_artwork, "Ctrl+K", P.SP_DesktopIcon,
-                               "Find missing cover art (Cover Art Archive, iTunes, Deezer)")
-        self.a_cue = self._act("Split CUE", self.split_cue, None, P.SP_MediaSeekForward,
-                               "Split albums stored as one big file + .cue sheet into separate tagged tracks")
+                               "Find cover art for the selected tracks (Cover Art Archive, iTunes, Deezer)")
+        self.a_choose_art = self._act("Pick Artwork…", self.choose_artwork, "Ctrl+Shift+K", P.SP_DesktopIcon,
+                                      "Choose a cover yourself from several online results")
+        self.a_clean = self._act("Clean Up", self.cleanup, "Ctrl+L", P.SP_DialogResetButton,
+                                 "Fix capitals and junk text, fill empty tags from file names")
+        self.a_paths = self._act("From Folders…", self.tags_from_paths, "Ctrl+Shift+F", P.SP_DirIcon,
+                                 "Fill in tags from the folder structure, e.g. Artist/Album (Year)/01 - Title")
         self.a_apply = self._act("Apply", self.apply, "Ctrl+Return", P.SP_DialogApplyButton,
-                                 "Write proposed changes of the selected tracks to the files")
+                                 "Write the New values of the selected tracks to their files (undoable)")
         self.a_discard = self._act("Discard", self.discard, "Ctrl+Backspace", P.SP_DialogDiscardButton,
-                                   "Drop proposed changes of the selected tracks")
+                                   "Forget the New values of the selected tracks (files aren't touched)")
+        # --- work on the whole library (the main toolbar)
+        self.a_fix = self._act("Fix Whole Library…", self.fix_library, "Ctrl+T", P.SP_MediaPlay,
+                               "Look up tags and artwork for all your music, then review the changes album by album")
+        self.a_review = self._act("Review Changes", lambda: self.review(), "Ctrl+R", P.SP_FileDialogListView,
+                                  "Go through all waiting changes one album (or folder) at a time")
         self.a_dupes = self._act("Duplicates", self.duplicates, "Ctrl+D", P.SP_FileDialogDetailedView,
                                  "Find duplicate songs (identical files, same audio, same tags)")
-        self.a_org = self._act("Organize", self.organize, "Ctrl+R", P.SP_DirIcon,
-                               "Rename and move files into folders based on their tags")
+        self.a_cue = self._act("Split CUE", self.split_cue, None, P.SP_MediaSeekForward,
+                               "Split albums stored as one big file + .cue sheet into separate tagged tracks")
+        self.a_org = self._act("Rename && Organize", self.organize, "Ctrl+Shift+R", P.SP_DirIcon,
+                               "Rename files and folders from their tags and sort them into a tidy folder structure")
         self.a_undo = self._act("Undo…", self.undo, "Ctrl+Z", P.SP_ArrowBack, "Undo tag writes, moves and removals")
         self.a_settings = self._act("Settings", self.settings_dialog, "Ctrl+,", P.SP_FileDialogInfoView)
-        self.a_log = self._act("Show Log", lambda: self.log_dock.setVisible(not self.log_dock.isVisible()), "Ctrl+Shift+L")
-        self.a_choose_art = self._act("Choose Artwork…", self.choose_artwork, "Ctrl+Shift+K")
+        self.a_log = self._act("Show Log", lambda: self.log_dock.setVisible(not self.log_dock.isVisible()),
+                               "Ctrl+Shift+L")
         self.a_select_all = self._act("Select All", self.table.selectAll, "Ctrl+A")
         self.a_files = self._act("Show Files Panel", lambda on: self.files.setVisible(on), "F6", None,
                                  "Show every file in the chosen folder (covers, .cue, .log, …) under the track list")
         self.a_files.setCheckable(True)
         self.a_files.setChecked(True)
 
-        tb = QToolBar("Main")
+        tb = QToolBar("Library")
         tb.setObjectName("main-toolbar")
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         tb.setMovable(False)
-        # Auto-Tag does everything; its menu has the individual steps
-        from PySide6.QtWidgets import QToolButton
-        auto_menu = QMenu(self)
-        for a in (self.a_ident, self.a_clean, self.a_paths, None, self.a_art, self.a_choose_art):
-            auto_menu.addSeparator() if a is None else auto_menu.addAction(a)
-        auto_btn = QToolButton()
-        auto_btn.setDefaultAction(self.a_auto)
-        auto_btn.setMenu(auto_menu)
-        auto_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        auto_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        for a in (self.a_add, self.a_scan, None, "auto", None, self.a_apply, self.a_discard, None,
-                  self.a_dupes, self.a_cue, self.a_org, None, self.a_undo, self.a_settings):
-            if a is None:
-                tb.addSeparator()
-            elif a == "auto":
-                tb.addWidget(auto_btn)
-            else:
-                tb.addAction(a)
+        for a in (self.a_add, self.a_scan, None, self.a_fix, self.a_review, None, self.a_dupes, self.a_cue,
+                  self.a_org, None, self.a_undo, self.a_settings):
+            tb.addSeparator() if a is None else tb.addAction(a)
         self.addToolBar(tb)
+
+        sb = self.sel_bar
+        sb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        lbl = QLabel("  Selected tracks:  ")
+        lbl.setObjectName("dim")
+        sb.addWidget(lbl)
+        # Apply / Discard and the artwork picker live under the Original | New comparison on the right
+        for a in (self.a_ident, self.a_art, self.a_clean, self.a_paths):
+            sb.addAction(a)
 
         m = self.menuBar()
         f = m.addMenu("&File")
@@ -616,12 +425,12 @@ class MainWindow(QMainWindow):
             f.addAction(a)
         f.addSeparator()
         f.addAction(self._act("Quit", self.close, "Ctrl+Q"))
-        t = m.addMenu("&Tags")
-        for a in (self.a_auto, None, self.a_ident, self.a_clean, self.a_paths, self.a_art, self.a_choose_art, None,
-                  self.a_apply, self.a_discard, self.a_undo):
+        t = m.addMenu("&Selected Tracks")
+        for a in (self.a_ident, self.a_art, self.a_choose_art, self.a_clean, self.a_paths, None,
+                  self.a_apply, self.a_discard, None, self.a_select_all):
             t.addSeparator() if a is None else t.addAction(a)
         lib_menu = m.addMenu("&Library")
-        for a in (self.a_dupes, self.a_cue, self.a_org, None, self.a_select_all, self.a_log):
+        for a in (self.a_fix, self.a_review, None, self.a_dupes, self.a_cue, self.a_org, None, self.a_undo):
             lib_menu.addSeparator() if a is None else lib_menu.addAction(a)
         v = m.addMenu("&View")
         v.addAction(self.a_files)
@@ -853,8 +662,8 @@ class MainWindow(QMainWindow):
     def _busy(self, busy: bool) -> None:
         self.progress.setVisible(busy)
         self.cancel_btn.setVisible(busy)
-        for a in (self.a_scan, self.a_auto, self.a_ident, self.a_clean, self.a_art, self.a_apply, self.a_dupes,
-                  self.a_org, self.a_undo):
+        for a in (self.a_scan, self.a_fix, self.a_review, self.a_ident, self.a_art, self.a_choose_art, self.a_clean,
+                  self.a_paths, self.a_apply, self.a_discard, self.a_dupes, self.a_cue, self.a_org, self.a_undo):
             a.setEnabled(not busy)
 
     def _progress(self, cur: int, total: int, msg: str) -> None:
@@ -878,18 +687,18 @@ class MainWindow(QMainWindow):
                 for r in range(self.proxy.rowCount())]
 
     def target_ids(self, verb: str) -> list[int] | None:
-        """Selected tracks, or (after confirming) everything in the current view."""
+        """The selected tracks. Buttons only ever work on the selection (Fix Whole Library does everything)."""
         ids = self.selected_ids()
         if ids:
             return ids
-        vis = self.visible_ids()
-        if not vis:
-            return None
-        where = f"in {Path(self.folder).name}" if self.folder else "in this view"
-        if QMessageBox.question(self, verb, f"No tracks selected. {verb} all {len(vis)} tracks {where}?") \
-                == QMessageBox.StandardButton.Yes:
-            return vis
+        QMessageBox.information(self, verb, "Select the tracks you want first: click a track, Shift- or "
+                                "Ctrl-click for several, or Ctrl+A for every track in the list.\n\n"
+                                "To work on your whole library, use Fix Whole Library.")
         return None
+
+    def refresh_tracks(self) -> None:
+        """Pending changes changed: redraw the list and the comparison, keeping the selection."""
+        self.reload()
 
     def reload(self) -> None:
         selected = set(self.selected_ids())
@@ -908,9 +717,11 @@ class MainWindow(QMainWindow):
         n = counts["review"]
         self.banner.setVisible(n > 0)
         if n:
-            self.banner_text.setText(f"<b>{n} track{'s have' if n != 1 else ' has'} proposed changes.</b> "
-                                     "Select a track to see them.")
-            self.b_review.setVisible(self.view_name != "review")
+            unit = "folder" if self.lib.settings.review_group == "folder" else "album"
+            groups = len(self.lib.review_groups(self.lib.settings.review_group))
+            self.banner_text.setText(f"<b>{n} track{'s have' if n != 1 else ' has'} new values waiting</b> "
+                                     f"({groups} {unit}{'s' if groups != 1 else ''}).")
+            self.b_review.setText(f"Review {unit.capitalize()} by {unit.capitalize()}…")
         self._selection_changed()
 
     def show_view(self, key: str) -> None:
@@ -918,11 +729,6 @@ class MainWindow(QMainWindow):
             if self.views.item(i).data(Qt.ItemDataRole.UserRole) == key:
                 self.views.setCurrentRow(i)
                 return
-
-    def apply_all(self) -> None:
-        ids = sorted(self.lib.db.proposal_ids())
-        if ids:
-            self._preview_and_apply(ids)
 
     def discard_all(self) -> None:
         ids = sorted(self.lib.db.proposal_ids())
@@ -958,7 +764,8 @@ class MainWindow(QMainWindow):
             stack.extend(node.child(i) for i in range(node.childCount()))
         first_fill = not hasattr(self, "_tree_filled")
         self._tree_filled = True
-        nodes = foldertree.build(tracks, self.lib.folders)
+        min_art = self.lib.settings.artwork_min_size
+        nodes = foldertree.build(tracks, self.lib.folders, lambda t: problems(t, min_art))
         icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
         self.tree.blockSignals(True)
         self.tree.clear()
@@ -969,9 +776,13 @@ class MainWindow(QMainWindow):
         items: dict[str, QTreeWidgetItem] = {}
 
         def add(parent, node, depth):
-            item = QTreeWidgetItem([f"{node.name}  ({node.count})"])
+            warn = f"  ⚠ {node.flagged}" if node.flagged else ""
+            item = QTreeWidgetItem([f"{node.name}  ({node.count}){warn}"])
             item.setData(0, Qt.ItemDataRole.UserRole, node.path)
-            item.setToolTip(0, f"{node.path}\n{node.count} track{'s' if node.count != 1 else ''}")
+            item.setToolTip(0, f"{node.path}\n{node.count} track{'s' if node.count != 1 else ''}"
+                            + (f", {node.flagged} need fixing" if node.flagged else ""))
+            if node.flagged:
+                item.setForeground(0, QBrush(RED))
             item.setIcon(0, icon)
             parent.addChild(item)
             items[node.path] = item
@@ -1077,7 +888,7 @@ class MainWindow(QMainWindow):
                 x for x in (t.get("artist"), t.get("title") or Path(t.path).stem) if x))))
         copy.setEnabled(bool(tracks))
         menu.addSeparator()
-        for a in (self.a_auto, self.a_ident, self.a_clean, self.a_paths, self.a_art, self.a_choose_art, None,
+        for a in (self.a_ident, self.a_art, self.a_choose_art, self.a_clean, self.a_paths, None,
                   self.a_apply, self.a_discard, None, self.a_org):
             menu.addSeparator() if a is None else menu.addAction(a)
         menu.addSeparator()
@@ -1150,42 +961,37 @@ class MainWindow(QMainWindow):
             self.status.setText(msg)
         return done
 
-    def auto_tag(self) -> None:
-        ids = self.target_ids("Auto-tag")
-        if ids:
-            self.run("Auto-tagging…", lambda task: self.lib.auto_tag(ids, task), self._after(
-                "Auto-tag: {r[applied]} files written, {r[review]} need review, {r[unmatched]} not found online"))
-
     def identify(self) -> None:
         ids = self.target_ids("Identify")
         if ids:
-            self.run("Identifying…", lambda task: self.lib.identify(ids, task), self._after(
-                "Identified {r[matched]} tracks ({r[confident]} confident), {r[unmatched]} not found"))
+            self.run("Looking up tags…", lambda task: self.lib.identify(ids, task), self._after(
+                "Found tags for {r[matched]} of " + str(len(ids)) + " tracks ({r[unmatched]} not found) - "
+                "compare Original and New on the right, then Apply", None))
 
     def cleanup(self) -> None:
         ids = self.target_ids("Clean up")
         if ids:
             self.run("Cleaning up tags…", lambda task: self.lib.cleanup(ids, task),
-                     self._after("Clean-up proposed fixes for {r} tracks"))
+                     self._after("Clean up: fixes for {r} tracks - compare on the right, then Apply", None))
 
     def fetch_artwork(self) -> None:
         ids = self.target_ids("Find artwork for")
         if ids:
-            self.run("Finding artwork…", lambda task: self.lib.fetch_artwork(ids, task),
-                     self._after("Found artwork for {r} tracks"))
+            self.run("Finding artwork…", lambda task: self.lib.fetch_artwork(ids, task, only_missing=False),
+                     self._after("Found artwork for {r} tracks - compare on the right, then Apply", None))
 
     def tags_from_paths(self) -> None:
         from .dialogs import PathTagsDialog
-        ids = self.selected_ids() or self.visible_ids()
+        ids = self.target_ids("Tags from folder names")
         if not ids:
-            self.status.setText("No tracks to read folder names from")
             return
         d = PathTagsDialog(self.lib, self.lib.tracks(ids), self)
         if d.exec():
             pattern, overwrite = d.result_options()
             self.run("Reading folder names…",
                      lambda task: self.lib.tags_from_paths(ids, task, pattern=pattern, overwrite=overwrite),
-                     self._after("Folder names: changes proposed for {r} tracks - review them, then Apply"))
+                     self._after("Folder names: new values for {r} tracks - compare on the right, then Apply",
+                                 None))
 
     def split_cue(self, folder: str | None = None) -> None:
         from .dialogs import CueDialog
@@ -1224,14 +1030,20 @@ class MainWindow(QMainWindow):
             self.reload()
 
     def apply(self) -> None:
+        """Write the new values of the selected tracks (and only those)."""
         pending = self.lib.db.proposal_ids()
-        ids = [i for i in self.selected_ids() if i in pending]
+        sel = self.selected_ids()
+        if not sel:
+            self.target_ids("Apply")
+            return
+        ids = [i for i in sel if i in pending]
         if not ids:
-            vis = [i for i in self.visible_ids() if i in pending]
-            if not vis:
-                self.status.setText("Nothing to apply")
-                return
-            ids = vis
+            self.status.setText("The selected tracks have no changes to apply")
+            return
+        if len(ids) == 1:          # what will be written is right there in the Original | New panel
+            self.run("Writing tags…", lambda task: self.lib.apply(ids, task),
+                     self._after("Saved - Ctrl+Z to undo", None))
+            return
         self._preview_and_apply(ids)
 
     def _preview_and_apply(self, ids: list[int]) -> None:
@@ -1246,6 +1058,39 @@ class MainWindow(QMainWindow):
         write, exclude = d.selection()
         self.run("Writing tags…", lambda task: self.lib.apply(write, task, exclude=exclude),
                  self._after("Wrote {r.written} files ({r.failed} failed) — Ctrl+Z to undo", None))
+
+    def fix_library(self) -> None:
+        from .compare import FixLibraryDialog
+        if not self.lib.folders:
+            self.add_folder()
+            return
+        d = FixLibraryDialog(self.lib, self.folder, self)
+        if not d.exec():
+            return
+        o = d.options()
+        if o["group"] != self.lib.settings.review_group:
+            self.lib.settings.review_group = o["group"]
+            save_settings(self.lib.settings)
+        scope = [t.id for t in foldertree.in_folder(self.lib.view("all"), o["folder"])]
+
+        def done(r) -> None:
+            self.reload()
+            self._log(f"Fix Whole Library: {r['waiting']} tracks have changes to review")
+            if r["waiting"]:
+                self.review(set(scope))
+            else:
+                QMessageBox.information(self, "Fix Whole Library", "Done - nothing needs changing.")
+        self.run("Fixing library… (looking up tags and artwork)",
+                 lambda task: self.lib.fix_library(scope, task, lookup=o["lookup"], artwork=o["artwork"],
+                                                   clean=o["clean"], skip_identified=o["skip_identified"]), done)
+
+    def review(self, ids: set[int] | None = None) -> None:
+        from .compare import ReviewWizard
+        if self.runner.busy:
+            QMessageBox.information(self, APP_NAME, "Please wait for the current task to finish (or cancel it).")
+            return
+        ReviewWizard(self.lib, self, ids=ids).exec()
+        self.reload()
 
     def discard(self) -> None:
         pending = self.lib.db.proposal_ids()
@@ -1265,10 +1110,11 @@ class MainWindow(QMainWindow):
         self.reload()
 
     def organize(self) -> None:
-        ids = self.selected_ids() or self.visible_ids()
-        if not ids:
+        all_ids = [t.id for t in self.lib.view("all")]
+        if not all_ids:
+            self.status.setText("Add a music folder first")
             return
-        dlg = OrganizeDialog(self.lib, self.runner, ids, self)
+        dlg = OrganizeDialog(self.lib, self.runner, self.selected_ids(), self, all_ids=all_ids)
         dlg.changed.connect(self.reload)
         dlg.exec()
 
