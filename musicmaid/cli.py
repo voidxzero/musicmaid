@@ -85,6 +85,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("update", help="check for a new MusicMaid release and install it")
     p.add_argument("--check", action="store_true", help="only check; don't install")
     sub.add_parser("history", help="list undoable operations")
+    sub.add_parser("snapshots", help="list the change snapshots saved in the library folders")
+    p = sub.add_parser("revert", help="revert a snapshot (or everything since it) from the library's MusicMaid folder")
+    p.add_argument("snapshot", help="number from 'snapshots' (1 = newest), or a snapshot id")
+    p.add_argument("--since", action="store_true", help="also revert every newer snapshot")
     p = sub.add_parser("undo", help="undo an operation (default: the latest)")
     p.add_argument("batch", nargs="?")
     p = sub.add_parser("config", help="show or change settings")
@@ -240,6 +244,25 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         _done()
         print(msg)
+    elif args.cmd == "snapshots":
+        import time
+        for i, s in enumerate(lib.snapshots(), 1):
+            state = "reverted" if s.reverted else ""
+            print(f"{i:>3}  {time.strftime('%Y-%m-%d %H:%M', time.localtime(s.created))}  {s.label:<28} "
+                  f"{s.changes:>5} changes  {state:<9} {s.text_path}")
+    elif args.cmd == "revert":
+        snaps = lib.snapshots()
+        pick = (snaps[int(args.snapshot) - 1] if args.snapshot.isdigit() and 0 < int(args.snapshot) <= len(snaps)
+                else next((s for s in snaps if s.batch == args.snapshot), None))
+        if not pick:
+            print("No such snapshot; see: musicmaid-cli snapshots")
+            return 1
+        todo = [s for s in snaps if s.created >= pick.created] if args.since else [pick]
+        n, problems = lib.revert_snapshots(todo, task)
+        _done()
+        for p in problems:
+            print("  " + p)
+        print(f"Reverted {n} changes")
     elif args.cmd == "history":
         import time
         for batch, label, ts, n in lib.history():

@@ -703,6 +703,8 @@ QToolButton[popupMode="1"] { padding-right: 16px; }
 QToolButton::menu-button { border: none; border-left: 1px solid %(border)s; width: 14px; background: transparent; }
 QToolButton::menu-button:hover { background: %(btn_top)s; }
 QToolButton::menu-arrow { image: url("%(down)s"); width: 9px; height: 9px; }
+QToolBar#selection-bar { spacing: 3px; }
+QToolBar#selection-bar QToolButton { padding: 1px 7px; min-height: 20px; }
 """ % dict(p, down=icons.get("down", ""))
 
 

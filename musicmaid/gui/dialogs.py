@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+    QAbstractItemView, QApplication, QCheckBox, QPlainTextEdit, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
     QSpinBox, QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
@@ -72,7 +72,7 @@ class SettingsDialog(QDialog):
         self.threshold.setValue(s.auto_apply_threshold)
         form.addRow("Write automatically from", self.threshold)
         form.addRow("", hint("Auto-Tag writes matches at least this confident (0.90 = 90%) straight away; "
-                             "anything less waits in Needs review."))
+                             "anything less waits in Changes to review."))
         self.country = QLineEdit(s.prefer_country)
         self.country.setPlaceholderText("e.g. US, GB, DE (empty = any)")
         form.addRow("Preferred release country", self.country)
@@ -119,8 +119,13 @@ class SettingsDialog(QDialog):
         self.cover_jpg.setChecked(s.save_cover_jpg)
         form.addRow("", self.cover_jpg)
 
-        # --- Duplicates
-        form = page("Duplicates")
+        # --- Safety & duplicates
+        form = page("Safety && Duplicates")
+        self.change_log = QCheckBox("Save every change in a MusicMaid folder inside each library folder")
+        self.change_log.setChecked(s.keep_change_log)
+        form.addRow("Change log", self.change_log)
+        form.addRow("", hint("A readable record of what changed, plus everything needed to put it back "
+                             "(Undo / History), even after reinstalling MusicMaid."))
         self.dupe_thr = QDoubleSpinBox()
         self.dupe_thr.setRange(0.5, 1.0)
         self.dupe_thr.setSingleStep(0.01)
@@ -301,6 +306,7 @@ class SettingsDialog(QDialog):
         s.acoustid_api_key = self.acoustid.text().strip()
         s.fpcalc_path = self.fpcalc.text().strip()
         s.ffmpeg_path = self.ffmpeg.text().strip()
+        s.keep_change_log = self.change_log.isChecked()
         if self.updates.isChecked() and not s.check_for_updates:
             s.skipped_update = ""
         s.check_for_updates = self.updates.isChecked()
@@ -674,34 +680,149 @@ class OrganizeDialog(QDialog):
 
 # ---------------------------------------------------------------- history
 class HistoryDialog(QDialog):
+    """Undo / History: the change snapshots kept in each library folder's MusicMaid folder (plus older changes
+    that only the app knows about). Revert one change set, or everything since a point in time."""
+
     def __init__(self, lib: Library, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Undo history")
-        self.resize(600, 400)
-        self.batch: str | None = None
-        self.list = QListWidget()
-        for batch, label, ts, n in lib.history():
-            it = QListWidgetItem(f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(ts))}   {label}   ({n} changes)")
-            it.setData(Qt.ItemDataRole.UserRole, batch)
-            self.list.addItem(it)
-        if self.list.count():
-            self.list.setCurrentRow(0)
-        self.list.itemDoubleClicked.connect(lambda _: self._undo())
-        buttons = QDialogButtonBox()
-        undo = buttons.addButton("Undo selected", QDialogButtonBox.ButtonRole.AcceptRole)
-        undo.setEnabled(self.list.count() > 0)
-        buttons.addButton(QDialogButtonBox.StandardButton.Close)
-        buttons.accepted.connect(self._undo)
-        buttons.rejected.connect(self.reject)
+        self.setWindowTitle("Undo / History")
+        self.resize(900, 520)
+        self.lib = lib
+        self.action: tuple[str, list] | None = None     # ("snapshots", [...]) or ("batch", [batch])
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("Undo operations newest-first for best results:"))
-        lay.addWidget(self.list)
-        lay.addWidget(buttons)
+        intro = QLabel("Every change MusicMaid makes is saved in a <b>MusicMaid</b> folder inside your library "
+                       "folder, so you can always go back, even after reinstalling. Newest first.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["When", "What", "Changes", "Status"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnWidth(0, 150)
+        self.table.setColumnWidth(3, 170)
+        self.table.itemSelectionChanged.connect(self._selected)
+        self.table.itemDoubleClicked.connect(lambda *_: self._details())
+        lay.addWidget(self.table, 1)
+        self.details = QPlainTextEdit()
+        self.details.setReadOnly(True)
+        self.details.setObjectName("log")
+        self.details.setMaximumHeight(170)
+        lay.addWidget(self.details)
+        row = QHBoxLayout()
+        self.b_folder = QPushButton("Open Snapshots Folder")
+        self.b_folder.clicked.connect(self._open_folder)
+        row.addWidget(self.b_folder)
+        row.addStretch(1)
+        self.b_since = QPushButton("Revert Everything Since This…")
+        self.b_since.setToolTip("Put the library back to how it was before this change (reverts this and every "
+                                "newer change, newest first)")
+        self.b_since.clicked.connect(self._revert_since)
+        self.b_one = QPushButton("Revert This Change")
+        self.b_one.setObjectName("primary")
+        self.b_one.clicked.connect(self._revert_one)
+        close = QPushButton("Close")
+        close.clicked.connect(self.reject)
+        for b in (self.b_since, self.b_one, close):
+            row.addWidget(b)
+        lay.addLayout(row)
+        self._fill()
 
-    def _undo(self) -> None:
-        it = self.list.currentItem()
-        if it:
-            self.batch = it.data(Qt.ItemDataRole.UserRole)
+    def _fill(self) -> None:
+        self.rows: list[tuple[str, object]] = []
+        snaps = self.lib.snapshots()
+        known = {s.batch for s in snaps}
+        for s in snaps:
+            self.rows.append(("snap", s))
+        # older changes from before snapshots existed (or with the log turned off): undo via the app's journal
+        for batch, label, ts, n in self.lib.history():
+            if batch not in known:
+                self.rows.append(("batch", (batch, label, ts, n)))
+        self.rows.sort(key=lambda r: r[1].created if r[0] == "snap" else r[1][2], reverse=True)
+        self.table.setRowCount(len(self.rows))
+        dim = self.palette().color(self.palette().ColorRole.PlaceholderText)
+        for i, (kind, obj) in enumerate(self.rows):
+            if kind == "snap":
+                when, what, n = obj.created, obj.label, obj.changes
+                status = "Reverted" if obj.reverted else "Saved in library"
+            else:
+                _, what, when, n = obj
+                status = "In the app only"
+            cells = [time.strftime("%Y-%m-%d %H:%M", time.localtime(when)), what, str(n), status]
+            for c, text in enumerate(cells):
+                it = QTableWidgetItem(text)
+                if kind == "snap" and obj.reverted:
+                    it.setForeground(dim)
+                self.table.setItem(i, c, it)
+        if self.rows:
+            self.table.selectRow(0)
+        else:
+            self.details.setPlainText("No changes yet.")
+        self._selected()
+
+    def _current(self):
+        r = self.table.currentRow()
+        return self.rows[r] if 0 <= r < len(self.rows) else (None, None)
+
+    def _selected(self) -> None:
+        kind, obj = self._current()
+        self.b_one.setEnabled(kind is not None and not (kind == "snap" and obj.reverted))
+        self.b_since.setEnabled(kind == "snap")
+        if kind == "snap":
+            try:
+                text = obj.text_path.read_text(encoding="utf-8")
+            except OSError:
+                text = "(the readable log file is missing)"
+            self.details.setPlainText(text[:20000] + ("\n…" if len(text) > 20000 else ""))
+        elif kind == "batch":
+            self.details.setPlainText(f"{obj[1]}: {obj[3]} changes. This change was made before change logs "
+                                      "were kept in the library folder; it can still be undone here.")
+
+    def _details(self) -> None:
+        kind, obj = self._current()
+        if kind == "snap":
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(obj.text_path)))
+
+    def _open_folder(self) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        kind, obj = self._current()
+        folder = obj.path.parent if kind == "snap" else (
+            Path(self.lib.folders[0]) / "MusicMaid" / "Snapshots" if self.lib.folders else None)
+        if folder:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def _revert_one(self) -> None:
+        kind, obj = self._current()
+        if kind == "snap":
+            newer = [s for k, s in self.rows if k == "snap" and s.created > obj.created and not s.reverted]
+            warn = (f"\n\n{len(newer)} newer change(s) exist. If they touched the same files, consider "
+                    "'Revert Everything Since This' instead." if newer else "")
+            if QMessageBox.question(self, "Revert", f"Revert \"{obj.label}\" ({obj.changes} changes)?{warn}") \
+                    == QMessageBox.StandardButton.Yes:
+                self.action = ("snapshots", [obj])
+                self.accept()
+        elif kind == "batch":
+            self.action = ("batch", [obj[0]])
+            self.accept()
+
+    def _revert_since(self) -> None:
+        kind, obj = self._current()
+        if kind != "snap":
+            return
+        todo = [s for k, s in self.rows if k == "snap" and s.created >= obj.created and not s.reverted]
+        n = sum(s.changes for s in todo)
+        if todo and QMessageBox.question(
+                self, "Revert everything since",
+                f"Put the library back to how it was before \"{obj.label}\" "
+                f"({time.strftime('%Y-%m-%d %H:%M', time.localtime(obj.created))})?\n\n"
+                f"This reverts {len(todo)} change set(s), {n} changes in total, newest first.") \
+                == QMessageBox.StandardButton.Yes:
+            self.action = ("snapshots", todo)
             self.accept()
 
 
@@ -1166,7 +1287,7 @@ class ApplyPreviewDialog(QDialog):
         self.lib = lib
         lay = QVBoxLayout(self)
         intro = QLabel("These changes will be written to your files. Untick anything you don't want: unticked "
-                       "changes stay in <i>Needs review</i>. Everything written can be undone.")
+                       "changes stay in <i>Changes to review</i>. Everything written can be undone.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
         self.tree = QTreeWidget()

@@ -46,7 +46,7 @@ It comes with three front-ends that share one engine:
   Chrome Deck, Emerald Core, Classic 98 and Vapor Dusk, plus *System* for your desktop's own look. Choose one
   under **View → Skin** or in **Settings**. Skins are small `.json` files with colours, not code, so they're safe
   to share, and skin files work in both apps.
-* **Safe by default.** Automatic results become **proposals** that you review (see *Needs review*) before
+* **Safe by default.** Automatic results become **proposals** that you review (see *Changes to review*) before
   anything is written. **Apply** first shows a preview of every change (old → new), where you can untick whole
   tracks or single fields. Only matches above a confidence threshold (default 90%) are written automatically
   by *Auto-tag*. **Every** tag write, move and duplicate removal is journaled and can be **undone**.
@@ -99,7 +99,7 @@ MusicMaid asks on first start (you can skip it).
 | Clean-up, artwork, duplicates, organize, undo | ✔ | ✔ |
 | Files with decent tags (artist + title or album) | ✔ identified via MusicBrainz search | ✔ |
 | Files with a MusicBrainz ID in their tags | ✔ | ✔ |
-| Untagged files, wrong tags, names like `Track 01.mp3` | only if the file/folder name helps; otherwise **Needs review** | ✔ recognised by their audio |
+| Untagged files, wrong tags, names like `Track 01.mp3` | only if the file/folder name helps; otherwise **Changes to review** | ✔ recognised by their audio |
 
 **Getting a key (about a minute):** go to <https://acoustid.org/new-application>, sign in, enter any
 application name (e.g. "MusicMaid"), and copy the **API key**. Paste it in the first-start prompt,
@@ -152,7 +152,7 @@ works on the selected tracks or the whole library.
 
 ### Terminal UI keys
 
-The left side shows the views (All tracks, Needs review, …) above a **folder tree** of your library; pick a
+The left side shows the views (All tracks, Changes to review, …) above a **folder tree** of your library; pick a
 folder with `enter` to see its tracks (including subfolders) in album order.
 `space` mark · `ctrl+a` mark all · `/` search · `t` auto-tag · `i` identify · `c` clean up ·
 `w` find artwork · `W` pick artwork · `e` edit tags · `a` apply · `x` discard · `d` duplicates ·

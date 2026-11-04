@@ -119,6 +119,7 @@ class Proposal:
 class Database:
     def __init__(self, path: str | Path | None = None):
         self.path = str(path or data_dir() / "library.db")
+        self.listeners: list = []          # called with every journal entry (change snapshots)
         self._local = threading.local()
         self._write_lock = threading.RLock()
         with self.conn() as c:
@@ -260,11 +261,14 @@ class Database:
         return uuid.uuid4().hex[:12]
 
     def journal(self, batch: str, label: str, op: str, track_id: int | None, src: str | None, dst: str | None, data=None) -> None:
+        ts = time.time()
         with self._write_lock, self.conn() as c:
             c.execute(
                 "INSERT INTO journal (batch, label, ts, op, track_id, src, dst, data) VALUES (?,?,?,?,?,?,?,?)",
-                (batch, label, time.time(), op, track_id, src, dst, json.dumps(data, ensure_ascii=False) if data is not None else None),
+                (batch, label, ts, op, track_id, src, dst, json.dumps(data, ensure_ascii=False) if data is not None else None),
             )
+        for fn in self.listeners:
+            fn(batch, label, ts, op, track_id, src, dst, data)
 
     def batches(self, limit: int = 30) -> list[tuple[str, str, float, int]]:
         return list(self.conn().execute(

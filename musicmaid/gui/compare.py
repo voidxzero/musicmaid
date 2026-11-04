@@ -2,6 +2,7 @@
 that follows Fix Whole Library."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -21,9 +22,10 @@ MAIN_FIELDS = ["title", "artist", "album", "albumartist", "tracknumber", "totalt
                "genre", "composer"]
 SHOW_FIELDS = MAIN_FIELDS + [f for f in tagio.EDITABLE_FIELDS if f not in MAIN_FIELDS]
 DIFFERENT = "(different values)"
+PER_TRACK = "(changes per track)"
 MISSING = "(missing)"
 REQUIRED = {"title", "artist", "album", "tracknumber"}     # empty ones are problems
-ART_SIZE = 150
+ART_SIZE = 120
 
 
 def _pixmap(data: bytes | None, size: int = ART_SIZE) -> QPixmap:
@@ -219,16 +221,28 @@ class ComparePanel(QWidget):
         italic = QFont()
         italic.setItalic(True)
         # what needs fixing, in red, before anything else
+        from ..cleanup import fixable
         counts: dict[str, int] = {}
+        notes: dict[str, int] = {}
         for t in tracks:
-            for pr in find_problems(t, self.lib.settings.artwork_min_size):
+            probs = find_problems(t, self.lib.settings.artwork_min_size)
+            fix = fixable(probs)
+            for pr in probs:
                 key = pr.split(" (")[0]
-                counts[key] = counts.get(key, 0) + 1
-        if counts:
-            items = [(k if n == 1 else f"{k} ({c} of {n})") for k, c in counts.items()]
-            self.problems.setText(f"<span style='color:{QColor(RED).name()}'><b>⚠ Needs fixing:</b> "
-                                  + ", ".join(items) + "</span>")
-            self.problems.setStyleSheet(f"QLabel#problems {{ border: 1px solid {QColor(RED).name()}; "
+                bucket = counts if pr in fix else notes
+                bucket[key] = bucket.get(key, 0) + 1
+        if counts or notes:
+            def items(d):
+                return ", ".join(k if n == 1 else f"{k} ({c} of {n})" for k, c in d.items())
+            html = ""
+            if counts:
+                html += f"<span style='color:{QColor(RED).name()}'><b>⚠ Needs fixing:</b> {items(counts)}</span>"
+            if notes:
+                from .mainwindow import AMBER
+                html += ("<br>" if html else "") + f"<span style='color:{QColor(AMBER).name()}'>Note: {items(notes)}</span>"
+            self.problems.setText(html)
+            edge = QColor(RED if counts else GREEN).name()
+            self.problems.setStyleSheet(f"QLabel#problems {{ border: 1px solid {edge}; "
                                         "border-radius: 3px; padding: 4px; }")
             self.problems.show()
         else:
@@ -241,6 +255,8 @@ class ComparePanel(QWidget):
             news = [(props[t.id].tags[f] if props[t.id] and f in props[t.id].tags else t.tags.get(f, ""))
                     for t in tracks]
             old, new = _common(olds), _common(news)
+            if new == DIFFERENT and olds != news:
+                new = PER_TRACK
             o = QTableWidgetItem(old)
             o.setFlags(Qt.ItemFlag.ItemIsEnabled)          # the Original column is read-only
             o.setForeground(self.palette().color(self.palette().ColorRole.PlaceholderText))
@@ -309,7 +325,7 @@ class ComparePanel(QWidget):
             return
         field = item.data(Qt.ItemDataRole.UserRole)
         value = item.text()
-        if value == DIFFERENT:
+        if value in (DIFFERENT, PER_TRACK):
             return
         self.lib.set_new_value([t.id for t in self.tracks], field, value)
         self.win.refresh_tracks()
@@ -431,13 +447,13 @@ class ReviewWizard(QDialog):
         self.b_back = QPushButton("◀ Back")
         self.b_back.clicked.connect(lambda: self._go(-1))
         self.b_stop = QPushButton("Stop for Now")
-        self.b_stop.setToolTip("Close; the remaining changes stay in Needs review for later")
+        self.b_stop.setToolTip("Close; the remaining changes stay in Changes to review for later")
         self.b_stop.clicked.connect(self.accept)
         self.b_discard = QPushButton("Discard && Next")
         self.b_discard.setToolTip("Throw away this album's changes (the files aren't touched)")
         self.b_discard.clicked.connect(self._discard)
         self.b_skip = QPushButton("Skip")
-        self.b_skip.setToolTip("Decide later: the changes stay in Needs review")
+        self.b_skip.setToolTip("Decide later: the changes stay in Changes to review")
         self.b_skip.clicked.connect(self._skip)
         self.b_apply = QPushButton("Apply && Next ▶")
         self.b_apply.setObjectName("primary")
@@ -476,8 +492,13 @@ class ReviewWizard(QDialog):
         unit = "folder" if self.by == "folder" else "album"
         self.counter.setText(f"{self.pos + 1} of {len(self.groups)}")
         shown = f"Folder: {Path(name).name}" if Path(name).is_absolute() else name
+        where = tracks[0].folder
+        root = next((r for r in sorted(self.lib.folders, key=len, reverse=True)
+                     if where == r or where.startswith(r.rstrip("/\\") + os.sep)), None)
+        if root:
+            where = os.path.relpath(where, root)
         self.title.setText(f"<h3 style='margin:0'>{shown}</h3>{len(tracks)} track{'s' if len(tracks) != 1 else ''}"
-                           f" with changes · {Path(tracks[0].folder)}")
+                           f" with changes · in {where}")
         self.b_back.setEnabled(self.pos > 0)
         props = {t.id: self.lib.db.proposal(t.id) for t in tracks}
         self.tree.blockSignals(True)
@@ -485,11 +506,33 @@ class ReviewWizard(QDialog):
         bold = QFont()
         bold.setBold(True)
 
+        scores = [p.score for p in props.values() if p and p.tags]
+        low = bool(scores) and min(scores) < 0.5
+        tick = Qt.CheckState.Unchecked if low else Qt.CheckState.Checked
+
         def check(item: QTreeWidgetItem, data) -> None:
             item.setData(0, Qt.ItemDataRole.UserRole, data)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(0, Qt.CheckState.Checked)
+            item.setCheckState(0, tick)
             item.setFont(2, bold)
+
+        def technical(f: str) -> bool:
+            return f.startswith("musicbrainz_") or f == "acoustid_id"
+
+        def add_rows(parent: QTreeWidgetItem, rows: list[QTreeWidgetItem]) -> None:
+            """Normal rows first; MusicBrainz IDs folded into one collapsed row (they're applied too)."""
+            ids = [r for r in rows if technical(r.data(0, Qt.ItemDataRole.UserRole)[1])]
+            for r in rows:
+                if r not in ids:
+                    parent.addChild(r)
+            if ids:
+                grp = QTreeWidgetItem([f"MusicBrainz IDs ({len(ids)})", "", "help other apps recognise it"])
+                grp.setFlags(grp.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
+                for r in ids:
+                    grp.addChild(r)
+                parent.addChild(grp)
+                folded.append(grp)
+        folded: list[QTreeWidgetItem] = []
 
         # changes that are the same for every track (album, album artist, year, …) are shown once
         fields = [f for f in tagio.FIELD_NAMES if any(props[t.id] and f in props[t.id].tags for t in tracks)]
@@ -503,16 +546,24 @@ class ReviewWizard(QDialog):
         if shared:
             head = QTreeWidgetItem([f"Whole {unit}", "", ""])
             head.setFlags(head.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
+            rows = []
             for f in shared:
                 old = tracks[0].tags.get(f) or "(empty)"
                 new = props[tracks[0].id].tags[f] or "(remove)"
                 it = QTreeWidgetItem([tagio.FIELD_LABELS.get(f, f), old, new])
                 check(it, ("*", f))
-                head.addChild(it)
-            head.setCheckState(0, Qt.CheckState.Checked)
+                rows.append(it)
+            add_rows(head, rows)
             self.tree.addTopLevelItem(head)
         same_art = self._same_art_everywhere(props)
-        for t in tracks:
+
+        def new_num(t):
+            p = props[t.id]
+            v = (p.tags.get("tracknumber") if p and p.tags.get("tracknumber") else t.tags.get("tracknumber")) or ""
+            d = (p.tags.get("discnumber") if p and p.tags.get("discnumber") else t.tags.get("discnumber")) or ""
+            from ..textutil import first_int
+            return (first_int(d) or 0, first_int(v) or 0, t.filename.lower())
+        for t in sorted(tracks, key=new_num):
             p = props[t.id]
             rows = []
             for f in per_track:
@@ -527,14 +578,15 @@ class ReviewWizard(QDialog):
                 check(rows[-1], (t.id, "__art__"))
             if not rows:
                 continue
-            num = (t.tags.get("tracknumber") or "").split("/")[0]
-            label = f"{num + '. ' if num else ''}{p.tags.get('title') if p and p.tags.get('title') else t.get('title') or t.filename}"
-            top = QTreeWidgetItem([label, "", ""])
+            num = new_num(t)[1]
+            label = f"{str(num) + '. ' if num else ''}" \
+                    f"{p.tags.get('title') if p and p.tags.get('title') else t.get('title') or t.filename}"
+            top = QTreeWidgetItem([label, t.filename, ""])
             top.setToolTip(0, t.path)
+            top.setToolTip(1, t.path)
+            top.setForeground(1, self.palette().color(self.palette().ColorRole.PlaceholderText))
             top.setFlags(top.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
-            for r in rows:
-                top.addChild(r)
-            top.setCheckState(0, Qt.CheckState.Checked)
+            add_rows(top, rows)
             self.tree.addTopLevelItem(top)
         # artwork, shown once when the whole group gets the same new cover
         old_art = next((tagio.read_artwork(t.path) for t in tracks if t.has_art), None)
@@ -554,12 +606,27 @@ class ReviewWizard(QDialog):
         else:
             self.art_new.show_art(old_art.data if old_art else None, "unchanged" if old_art else "", "No artwork")
         self.tree.expandAll()
+        for g in folded:
+            g.setExpanded(False)
         self.tree.blockSignals(False)
         srcs = sorted({s for p in props.values() if p for s in p.source.split(", ") if s})
-        scores = [p.score for p in props.values() if p and p.tags]
-        self.note.setText(f"Changes from {', '.join(srcs)}" + (f" · confidence {min(scores):.0%}–{max(scores):.0%}"
-                                                              if scores else "")
-                          + ". Untick anything you don't want; unticked changes stay in Needs review.")
+        conf = ""
+        if scores:
+            lo, hi = min(scores), max(scores)
+            conf = f" · {lo:.0%} sure" if lo == hi else f" · {lo:.0%}–{hi:.0%} sure"
+        text = f"Changes from {', '.join(srcs)}{conf}. Untick anything you don't want; unticked changes stay in " \
+               "Changes to review."
+        nums = [new_num(t)[:2] for t in tracks if new_num(t)[1]]
+        if len(nums) != len(set(nums)):
+            from .mainwindow import AMBER
+            text = (f"<span style='color:{QColor(AMBER).name()}'><b>Two files would be the same track</b> - one "
+                    "is probably a duplicate (Duplicates can remove it).</span> ") + text
+        if scores and min(scores) < 0.6:
+            from .mainwindow import RED
+            text = (f"<span style='color:{QColor(RED).name()}'><b>⚠ Unsure match ({min(scores):.0%}).</b> "
+                    + ("Nothing is ticked: tick what's right, or use Discard &amp; Next. " if low else
+                       "Check it carefully before applying. ") + "</span>" + text)
+        self.note.setText(text)
         self._count()
 
     @staticmethod
@@ -568,13 +635,13 @@ class ReviewWizard(QDialog):
         return bool(arts) and len(arts) == len(props) and all(a == arts[0] for a in arts)
 
     def _leaves(self):
-        for i in range(self.tree.topLevelItemCount()):
-            top = self.tree.topLevelItem(i)
-            if top.childCount():
-                for j in range(top.childCount()):
-                    yield top.child(j)
+        stack = [self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())]
+        while stack:
+            it = stack.pop(0)
+            if it.childCount():
+                stack[:0] = [it.child(j) for j in range(it.childCount())]
             else:
-                yield top
+                yield it
 
     def _count(self) -> None:
         on = sum(1 for it in self._leaves() if it.checkState(0) == Qt.CheckState.Checked)
@@ -601,7 +668,7 @@ class ReviewWizard(QDialog):
             QApplication.restoreOverrideCursor()
         if res.failed:
             QMessageBox.warning(self, "Review", f"{res.failed} file(s) couldn't be written (see the log). "
-                                "Their changes stay in Needs review.")
+                                "Their changes stay in Changes to review.")
         self.batches.append(res.batch)
         self.stats["applied"] += 1
         self.stats["tracks"] += res.written
@@ -628,7 +695,7 @@ class ReviewWizard(QDialog):
         self.counter.clear()
         self.title.setText(f"<h3>All done</h3>Applied changes to {s['tracks']} tracks in {s['applied']} "
                            f"{'folders' if self.by == 'folder' else 'albums'}; skipped {s['skipped']}, discarded "
-                           f"{s['discarded']}. Skipped changes are still in <i>Needs review</i>. "
+                           f"{s['discarded']}. Skipped changes are still in <i>Changes to review</i>. "
                            "Everything applied can be undone with Undo.")
         self.note.clear()
         for b in (self.b_discard, self.b_skip, self.b_back):

@@ -16,7 +16,7 @@ ACOUSTID_WITH = (
 ACOUSTID_WITHOUT = (
     "Without a key: everything else still works (clean-up, artwork, duplicates, organizing). Songs are "
     "identified from their existing tags, MusicBrainz IDs and file/folder names. That works well for "
-    "roughly-tagged music, but files with no useful tags or names end up in \"Needs review\" for you "
+    "roughly-tagged music, but files with no useful tags or names end up in \"Changes to review\" for you "
     "to fix by hand."
 )
 

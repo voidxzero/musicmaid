@@ -24,11 +24,11 @@ from .providers import artwork as artprov
 
 VIEWS = {
     "all": "All tracks",
-    "review": "Needs review",
+    "review": "Changes to review",
     "untagged": "Untagged",
-    "noart": "Missing artwork",
-    "problems": "Problems",
-    "errors": "Unreadable",
+    "noart": "No artwork",
+    "problems": "Needs fixing",
+    "errors": "Unreadable files",
 }
 
 
@@ -43,6 +43,10 @@ class Library:
     def __init__(self, db: Database | None = None, settings: Settings | None = None):
         self.db = db or Database()
         self.settings = settings or load_settings()
+        from . import snapshots
+        # every change is also written to <library folder>/MusicMaid/Snapshots (see snapshots.py)
+        self.recorder = snapshots.Recorder(lambda: self.folders, lambda: self.settings.keep_change_log)
+        self.db.listeners.append(self.recorder.record)
 
     # ------------------------------------------------------------ folders & scanning
     @property
@@ -79,7 +83,7 @@ class Library:
         elif name == "noart":
             tracks = [t for t in tracks if not t.error and not t.has_art]
         elif name == "problems":
-            tracks = [t for t in tracks if cleanup.problems(t, self.settings.artwork_min_size)]
+            tracks = [t for t in tracks if cleanup.fixable(cleanup.problems(t, self.settings.artwork_min_size))]
         elif name == "errors":
             tracks = [t for t in tracks if t.error]
         if search:
@@ -96,7 +100,7 @@ class Library:
             "review": len(pids),
             "untagged": sum(1 for t in tracks if not t.error and cleanup.is_untagged(t)),
             "noart": sum(1 for t in tracks if not t.error and not t.has_art),
-            "problems": sum(1 for t in tracks if cleanup.problems(t, self.settings.artwork_min_size)),
+            "problems": sum(1 for t in tracks if cleanup.fixable(cleanup.problems(t, self.settings.artwork_min_size))),
             "errors": sum(1 for t in tracks if t.error),
         }
 
@@ -217,7 +221,8 @@ class Library:
             if isinstance(art, (bytes, bytearray)):
                 art = tagio.prepare_artwork(bytes(art), self.settings.artwork_max_size)
         tagio.write(t.path, changes, art)
-        self.db.journal(batch, label, "tags", t.id, t.path, None, {"tags": old_tags, "art": journal_art})
+        self.db.journal(batch, label, "tags", t.id, t.path, None,
+                        {"tags": old_tags, "new": dict(changes), "art": journal_art})
         if self.settings.save_cover_jpg and isinstance(art, (bytes, bytearray)):
             cover = Path(t.folder) / "cover.jpg"
             if not cover.exists():
@@ -602,4 +607,23 @@ class Library:
             except Exception as e:
                 task.log(f"Undo failed for {src or dst}: {e}")
         self.db.mark_undone(undone)
+        from . import snapshots
+        snapshots.mark_reverted(self.folders, batch)
         return len(undone)
+
+    # ------------------------------------------------------------ change snapshots in the library
+    def snapshots(self) -> list:
+        from . import snapshots
+        return snapshots.list_snapshots(self.folders)
+
+    def revert_snapshots(self, snaps: list, task: Task = NULL_TASK) -> tuple[int, list[str]]:
+        """Revert snapshots newest first. Returns (changes reverted, problems)."""
+        from . import snapshots
+        done, problems = 0, []
+        for s in sorted(snaps, key=lambda s: s.created, reverse=True):
+            if s.reverted:
+                continue
+            d, p = snapshots.revert(s, self, task)
+            done += d
+            problems += p
+        return done, problems

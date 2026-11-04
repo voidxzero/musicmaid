@@ -106,3 +106,18 @@ def test_organize_and_undo(library):
     lib.undo(batch)
     assert (root / "Downloads" / "Airbag [www.junk.com].mp3").exists()
     assert (root / "Radiohead" / "OK Computer" / "02 - x.mp3").exists()
+
+
+def test_txxx_comment_is_read_and_replaced(tmp_path):
+    from mutagen.id3 import ID3, TXXX
+    import sys, os
+    sys.path.insert(0, os.path.dirname(__file__))
+    from conftest import make_audio
+    from musicmaid import tags as tagio
+    f = make_audio(tmp_path / "a.mp3", 1, 2)
+    t = ID3(f)
+    t.add(TXXX(encoding=3, desc="comment", text=["ripped by www.example.com"]))
+    t.save()
+    assert tagio.read(f).tags["comment"] == "ripped by www.example.com"
+    tagio.write(f, {"comment": ""})
+    assert "comment" not in tagio.read(f).tags and not ID3(f).getall("TXXX:comment")

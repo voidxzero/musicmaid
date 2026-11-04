@@ -213,6 +213,11 @@ def _id3_read(tags: ID3, out: dict[str, str]) -> Artwork | None:
     comms = [c for c in tags.getall("COMM") if not c.desc or c.desc.lower() == "comment"]
     if comms and comms[0].text:
         out["comment"] = str(comms[0].text[0])
+    else:
+        # some tools (e.g. ffmpeg) store the comment as a TXXX:comment frame instead
+        txxx = [f for f in tags.getall("TXXX") if f.desc.lower() == "comment" and f.text]
+        if txxx:
+            out["comment"] = str(txxx[0].text[0])
     pics = tags.getall("APIC")
     if pics:
         front = next((p for p in pics if p.type == 3), pics[0])
@@ -243,6 +248,9 @@ def _id3_write(tags: ID3, merged: dict[str, str], changed: set[str]) -> None:
             for c in list(tags.getall("COMM")):
                 if not c.desc or c.desc.lower() == "comment":
                     tags.delall(c.HashKey)
+            for x in list(tags.getall("TXXX")):
+                if x.desc.lower() == "comment":
+                    tags.delall(x.HashKey)
             if val:
                 tags.add(COMM(encoding=3, lang="eng", desc="", text=[val]))
     if changed & {"tracknumber", "totaltracks"}:

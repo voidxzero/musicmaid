@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 
 from .. import APP_NAME, __version__
 from .. import tags as tagio
-from ..cleanup import problems
+from ..cleanup import fixable, problems
 from ..db import Track
 from ..config import save_settings
 from ..fingerprint import can_download_fpcalc, download_fpcalc, find_fpcalc
@@ -78,8 +78,12 @@ class TrackModel(QAbstractTableModel):
             return "New", GREEN, (f"New values from {src} ({score:.0%} sure) - select the track to compare "
                                   "Original and New, then Apply or Discard")
         probs = problems(t, self.lib.settings.artwork_min_size)
-        if probs:
+        if probs and probs[0].startswith("whole album"):
+            return "CUE", AMBER, "This one file holds a whole album: select its folder and use Split CUE"
+        if fixable(probs):
             return "Fix", RED, "Needs fixing: " + ", ".join(probs)
+        if probs:
+            return "OK", GREEN, "Tags look fine. Note: " + ", ".join(probs)
         return "OK", GREEN, "Tags look complete"
 
     def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
@@ -109,7 +113,10 @@ class TrackModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ForegroundRole:
             if key == "state":
                 return QBrush(self._state(t)[1])
-            if key == "problems" or (key in ("artist", "album") and not t.get(key)):
+            if key == "problems":
+                probs = problems(t, self.lib.settings.artwork_min_size)
+                return QBrush(RED if fixable(probs) else AMBER)
+            if key in ("artist", "album") and not t.get(key):
                 return QBrush(RED)
             if key == "title" and not t.get("title"):
                 return QBrush(RED)
@@ -198,7 +205,7 @@ class MainWindow(QMainWindow):
         folders_lbl.setObjectName("dim")
         sl.addWidget(folders_lbl)
         sl.addWidget(self.tree, 1)
-        sidebar.setMinimumWidth(200)
+        sidebar.setMinimumWidth(180)
 
         # track table
         self.model = TrackModel(self.lib)
@@ -307,7 +314,7 @@ class MainWindow(QMainWindow):
         detail_scroll = QScrollArea()
         detail_scroll.setWidgetResizable(True)
         detail_scroll.setWidget(self.detail)
-        detail_scroll.setMinimumWidth(340)
+        detail_scroll.setMinimumWidth(320)
         self.detail_scroll = detail_scroll
 
         split = QSplitter()
@@ -315,7 +322,7 @@ class MainWindow(QMainWindow):
         split.addWidget(center)
         split.addWidget(detail_scroll)
         split.setStretchFactor(1, 1)
-        split.setSizes([280, 850, 400])
+        split.setSizes([230, 900, 370])
         self.split = split
         self.setCentralWidget(split)
 
@@ -391,7 +398,9 @@ class MainWindow(QMainWindow):
                                "Split albums stored as one big file + .cue sheet into separate tagged tracks")
         self.a_org = self._act("Rename && Organize", self.organize, "Ctrl+Shift+R", P.SP_DirIcon,
                                "Rename files and folders from their tags and sort them into a tidy folder structure")
-        self.a_undo = self._act("Undo…", self.undo, "Ctrl+Z", P.SP_ArrowBack, "Undo tag writes, moves and removals")
+        self.a_undo = self._act("Undo / History…", self.undo, "Ctrl+Z", P.SP_ArrowBack,
+                                "See every change made and put things back (one change, or everything since a "
+                                "point in time)")
         self.a_settings = self._act("Settings", self.settings_dialog, "Ctrl+,", P.SP_FileDialogInfoView)
         self.a_log = self._act("Show Log", lambda: self.log_dock.setVisible(not self.log_dock.isVisible()),
                                "Ctrl+Shift+L")
@@ -412,12 +421,17 @@ class MainWindow(QMainWindow):
 
         sb = self.sel_bar
         sb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        lbl = QLabel("  Selected tracks:  ")
+        lbl = QLabel(" Selected: ")
         lbl.setObjectName("dim")
         sb.addWidget(lbl)
         # Apply / Discard and the artwork picker live under the Original | New comparison on the right
-        for a in (self.a_ident, self.a_art, self.a_clean, self.a_paths):
-            sb.addAction(a)
+        self.a_select_here = self._act("Select All", self.table.selectAll, None, None,
+                                       "Select every track in the list (Ctrl+A)")
+        for a in (self.a_select_here, None, self.a_ident, self.a_art, self.a_clean, self.a_paths):
+            sb.addSeparator() if a is None else sb.addAction(a)
+        from PySide6.QtWidgets import QToolButton
+        for b in sb.findChildren(QToolButton):
+            b.setAutoRaise(False)            # look like buttons, not plain text
 
         m = self.menuBar()
         f = m.addMenu("&File")
@@ -483,22 +497,25 @@ class MainWindow(QMainWindow):
         updater.cleanup_previous()
         if self.lib.settings.check_for_updates:
             self.check_updates(manual=False)
+        # no pop-ups at start: the welcome page explains the first step, and the optional extras
+        # (fpcalc, AcoustID key) are offered when they'd actually help (see _offer_sound_id)
         if not find_fpcalc():
-            self._log("fpcalc (Chromaprint) was not found: audio-based duplicate detection and AcoustID lookups are "
-                      "disabled. Use Help → Download fpcalc, install Chromaprint, or set the fpcalc path in Settings.")
-            self.log_dock.show()
-            if can_download_fpcalc() and self.lib.settings.offer_fpcalc_download:
-                self._offer_fpcalc()
-        if not self.lib.settings.acoustid_key and self.lib.settings.offer_acoustid_key:
-            self.acoustid_key(first_run=True)
+            self._log("fpcalc (Chromaprint) isn't installed: recognising songs by sound and finding re-encoded "
+                      "duplicates are off. Settings → Tools can download it.")
         if not self.lib.settings.acoustid_key:
-            self._log("No AcoustID key: songs are identified from tags and file names only. Add a free key with "
-                      "Help → Identify by Sound to recognise untagged or wrongly tagged files.")
-        if not self.lib.folders:
-            QMessageBox.information(self, f"Welcome to {APP_NAME}",
-                                    "Start by adding your music folder. Nothing is changed on disk until you apply "
-                                    "changes, and every change can be undone.")
-            self.add_folder()
+            self._log("No AcoustID key: songs are recognised from their tags and file names only.")
+        for err in self.lib.recorder.errors:
+            self._log(err)
+
+    def _offer_sound_id(self, unmatched: int) -> None:
+        """Some tracks weren't found from their tags/names: offer recognising them by sound, once."""
+        s = self.lib.settings
+        if not unmatched or not s.offer_acoustid_key or (s.acoustid_key and find_fpcalc()):
+            return
+        if not find_fpcalc() and can_download_fpcalc() and s.offer_fpcalc_download:
+            self._offer_fpcalc()
+        if not s.acoustid_key:
+            self.acoustid_key(first_run=True)
 
     def acoustid_key(self, first_run: bool) -> None:
         had = bool(self.lib.settings.acoustid_key)
@@ -765,7 +782,7 @@ class MainWindow(QMainWindow):
         first_fill = not hasattr(self, "_tree_filled")
         self._tree_filled = True
         min_art = self.lib.settings.artwork_min_size
-        nodes = foldertree.build(tracks, self.lib.folders, lambda t: problems(t, min_art))
+        nodes = foldertree.build(tracks, self.lib.folders, lambda t: fixable(problems(t, min_art)))
         icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
         self.tree.blockSignals(True)
         self.tree.clear()
@@ -944,8 +961,13 @@ class MainWindow(QMainWindow):
             return
 
         def done(r):
-            self._log(f"Scan: {r}")
+            parts = [f"{r.get('added', 0)} new", f"{r.get('updated', 0)} changed", f"{r.get('removed', 0)} gone"]
+            msg = f"Scan finished: {self.lib.db.count()} tracks (" + ", ".join(parts) + ")"
+            if r.get("errors"):
+                msg += f"; {r['errors']} files couldn't be read (see Unreadable files)"
+            self._log(msg)
             self.reload()
+            self.status.setText(msg)
         self.run("Scanning library…", lambda task: self.lib.scan(task), done)
 
     def _after(self, fmt: str, view: str | None = "review"):
@@ -964,9 +986,13 @@ class MainWindow(QMainWindow):
     def identify(self) -> None:
         ids = self.target_ids("Identify")
         if ids:
-            self.run("Looking up tags…", lambda task: self.lib.identify(ids, task), self._after(
-                "Found tags for {r[matched]} of " + str(len(ids)) + " tracks ({r[unmatched]} not found) - "
-                "compare Original and New on the right, then Apply", None))
+            after = self._after("Found tags for {r[matched]} of " + str(len(ids)) + " tracks ({r[unmatched]} not "
+                                "found) - compare Original and New on the right, then Apply", None)
+
+            def done(r) -> None:
+                after(r)
+                self._offer_sound_id(r.get("unmatched", 0))
+            self.run("Looking up tags…", lambda task: self.lib.identify(ids, task), done)
 
     def cleanup(self) -> None:
         ids = self.target_ids("Clean up")
@@ -1120,9 +1146,24 @@ class MainWindow(QMainWindow):
 
     def undo(self) -> None:
         dlg = HistoryDialog(self.lib, self)
-        if dlg.exec() and dlg.batch:
-            batch = dlg.batch
-            self.run("Undoing…", lambda task: self.lib.undo(batch, task), self._after("Undid {r} changes", None))
+        if not dlg.exec() or not dlg.action:
+            return
+        kind, items = dlg.action
+        if kind == "batch":
+            self.run("Undoing…", lambda task: self.lib.undo(items[0], task), self._after("Undid {r} changes", None))
+            return
+
+        def done(r) -> None:
+            n, problems = r
+            for p in problems:
+                self._log("Revert: " + p)
+            if problems:
+                self.log_dock.show()
+                QMessageBox.warning(self, "Revert", f"Reverted {n} changes; {len(problems)} couldn't be reverted "
+                                    "(see the log).")
+            self.reload()
+            self.status.setText(f"Reverted {n} changes")
+        self.run("Reverting…", lambda task: self.lib.revert_snapshots(items, task), done)
 
     def settings_dialog(self) -> None:
         if SettingsDialog(self.lib, self).exec():

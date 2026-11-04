@@ -15,7 +15,7 @@ from textual.widgets import (
 
 from .. import APP_NAME, __version__
 from .. import tags as tagio
-from ..cleanup import problems
+from ..cleanup import fixable, problems
 from ..config import save_settings
 from ..fingerprint import can_download_fpcalc, download_fpcalc, find_fpcalc
 from .. import foldertree, updater
@@ -287,7 +287,7 @@ class MusicMaidTUI(TaskMixin, App):
         first = not self._tree_filled
         self._tree_filled = True
         min_art = self.lib.settings.artwork_min_size
-        nodes = foldertree.build(tracks, self.lib.folders, lambda t: problems(t, min_art))
+        nodes = foldertree.build(tracks, self.lib.folders, lambda t: fixable(problems(t, min_art)))
         tree.clear()
         tree.root.set_label(f"All folders ({len(tracks)})")
         tree.root.data = ""
@@ -518,15 +518,15 @@ class MusicMaidTUI(TaskMixin, App):
 
     def action_identify(self) -> None:
         self._scope("Identify", lambda ids, task: self.lib.identify(ids, task),
-                    "Identified {r[matched]} ({r[confident]} confident), {r[unmatched]} not found — see Needs review")
+                    "Identified {r[matched]} ({r[confident]} confident), {r[unmatched]} not found — see Changes to review")
 
     def action_cleanup(self) -> None:
         self._scope("Clean up", lambda ids, task: self.lib.cleanup(ids, task),
-                    "{r} tracks have proposed fixes — see Needs review")
+                    "{r} tracks have proposed fixes — see Changes to review")
 
     def action_artwork(self) -> None:
         self._scope("Find artwork", lambda ids, task: self.lib.fetch_artwork(ids, task),
-                    "Artwork found for {r} tracks — see Needs review")
+                    "Artwork found for {r} tracks — see Changes to review")
 
     def action_choose_artwork(self) -> None:
         t = self._cursor_track()

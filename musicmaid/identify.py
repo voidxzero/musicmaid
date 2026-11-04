@@ -40,6 +40,7 @@ class RelInfo:
     track_count: int = 0
     disc: int = 0
     track_pos: int = 0
+    artist: str = ""          # the release's own artist credit ("Various Artists" for compilations)
 
 
 @dataclass
@@ -84,6 +85,7 @@ def _rel_from_acoustid(rg: dict, rel: dict, recording_id: str = "") -> list[RelI
             primary_type=(rg.get("type") or "").lower(), secondary_types=tuple(s.lower() for s in rg.get("secondarytypes", [])),
             status="official", country=rel.get("country", ""), date=date,
             track_count=medium.get("track_count") or rel.get("track_count", 0), disc=medium.get("position", 1), track_pos=pos,
+            artist="".join(a.get("name", "") + a.get("joinphrase", "") for a in (rel.get("artists") or rg.get("artists") or [])),
         ))
     return out
 
@@ -123,6 +125,7 @@ def _rel_from_search(rel: dict, recording_id: str = "") -> list[RelInfo]:
             secondary_types=tuple(s.lower() for s in rg.get("secondary-types", []) or []),
             status=(rel.get("status") or "").lower(), country=rel.get("country", "") or "", date=rel.get("date", "") or "",
             track_count=medium.get("track-count", 0), disc=medium.get("position", 1), track_pos=pos or 0,
+            artist=mb.artist_credit_phrase(rel.get("artist-credit") or rg.get("artist-credit")),
         ))
     return out
 
@@ -157,6 +160,7 @@ def candidates_from_release(release: dict) -> list[tuple[Candidate, dict]]:
                 status=(release.get("status") or "").lower(), country=release.get("country", "") or "",
                 date=release.get("date", "") or "", track_count=medium.get("track-count", 0),
                 disc=medium.get("position", 1), track_pos=t.get("position", 0),
+                artist=mb.artist_credit_phrase(release.get("artist-credit")),
             )
             c = Candidate(recording_id=rec.get("id", ""), title=t.get("title") or rec.get("title", ""),
                           artist=mb.artist_credit_phrase(t.get("artist-credit") or rec.get("artist-credit")),
@@ -233,6 +237,14 @@ def release_preference(rel: RelInfo, q: dict[str, str], settings: Settings, vote
         s += {"album": 0.3, "ep": 0.15, "single": 0.1}.get(rel.primary_type, 0.0)
     if "compilation" in rel.secondary_types:
         s -= 0.25
+    if set(rel.secondary_types) & {"dj-mix", "mixtape/street", "remix"}:
+        s -= 0.25
+    # another artist's release (a DJ mix, a tribute, a "chip mix" …) is rarely the one people mean
+    wanted = q.get("albumartist") or q.get("artist") or ""
+    various = ("various artists", "various", "va")
+    if rel.artist and wanted and rel.artist.lower() not in various and wanted.lower() not in various:
+        if similarity(wanted, rel.artist) < 0.5 and norm(wanted) not in norm(rel.artist):
+            s -= 0.35
     if "live" in rel.secondary_types and "live" not in (q.get("album", "") + q.get("title", "")).lower():
         s -= 0.3
     if rel.status == "official":

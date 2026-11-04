@@ -38,6 +38,7 @@ class Settings:
     offer_fpcalc_download: bool = True  # ask at startup when fpcalc is missing
     offer_acoustid_key: bool = True  # ask at startup when no AcoustID key is set
     skin: str = ""  # GUI skin (see gui/skins.py); empty = the platform default, "System" = desktop look
+    keep_change_log: bool = True  # record every change in <library folder>/MusicMaid/Snapshots
     check_for_updates: bool = True  # look for a new release on GitHub at startup
     skipped_update: str = ""  # version the user chose to skip
     # identification

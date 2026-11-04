@@ -163,10 +163,20 @@ def propose_cleanup(db: Database, tracks: list[Track], options: CleanupOptions |
 
 
 # ---------------------------------------------------------------- problem detection
+# notes about a file that changing tags can't fix (shown, but not counted as "needs fixing")
+NOTES = ("low bitrate",)
+
+
+def fixable(probs: list[str]) -> list[str]:
+    return [p for p in probs if not p.startswith(NOTES)]
+
+
 def problems(t: Track, min_art: int = 500) -> list[str]:
     p = []
     if t.error:
         return ["unreadable file"]
+    if t.duration >= 600 and Path(t.path).with_suffix(".cue").exists():
+        return ["whole album in one file - use Split CUE"]
     if not t.tags.get("title"):
         p.append("no title")
     elif is_generic_title(t.tags["title"]):
