@@ -88,26 +88,15 @@ GitHub release. The download is checked against a pinned SHA-256 checksum and st
 folder. You can also do it later with **Help → Download fpcalc** or `musicmaid-cli fpcalc`, or point
 **Settings** at your own copy. The standalone apps below already include it.
 
-### With or without AcoustID
+### Recognising songs by their sound
 
-MusicMaid works without any account or key. AcoustID is an optional extra that lets it recognise songs by
-their **sound**. It's free for open-source apps like this one, but each user needs their own free key, so
-MusicMaid asks on first start (you can skip it).
-
-| | Without a key | With a free AcoustID key |
-|---|---|---|
-| Clean-up, artwork, duplicates, organize, undo | ✔ | ✔ |
-| Files with decent tags (artist + title or album) | ✔ identified via MusicBrainz search | ✔ |
-| Files with a MusicBrainz ID in their tags | ✔ | ✔ |
-| Untagged files, wrong tags, names like `Track 01.mp3` | only if the file/folder name helps; otherwise **Changes to review** | ✔ recognised by their audio |
-
-**Getting a key (about a minute):** go to <https://acoustid.org/new-application>, sign in, enter any
-application name (e.g. "MusicMaid"), and copy the **API key**. Paste it in the first-start prompt,
-**Help → Identify by Sound**, **Settings**, or run `musicmaid-cli config acoustid_api_key YOURKEY`. The key
-is checked with AcoustID before it's saved. Identifying by sound also needs `fpcalc`, which the standalone
-apps include and MusicMaid offers to download otherwise.
-
-Only each file's audio fingerprint and length are sent to AcoustID, never the audio itself.
+MusicMaid recognises songs by their **sound** (AcoustID audio fingerprints), so even untagged files, wrongly
+tagged files and files called `Track 01.mp3` get the right title, artist and album. This works out of the
+box: MusicMaid comes with its own AcoustID key, and the standalone apps include Chromaprint's `fpcalc` (when
+running from source, MusicMaid offers to download it). If you'd rather use your own free key
+(<https://acoustid.org/new-application>), enter it in **Settings** or with
+`musicmaid-cli config acoustid_api_key YOURKEY`. Only each file's audio fingerprint and length are sent to
+AcoustID, never the audio itself.
 
 ## How to use it
 

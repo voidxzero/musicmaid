@@ -89,11 +89,11 @@ class SettingsDialog(QDialog):
         form.addRow("Name for various artists", self.va)
         self.acoustid = QLineEdit(s.acoustid_api_key)
         self.acoustid.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
-        self.acoustid.setPlaceholderText("optional")
-        form.addRow("AcoustID API key", self.acoustid)
-        form.addRow("", hint('Optional: <a href="https://acoustid.org/new-application">get a free key</a> to '
-                             "recognise songs by their sound, even with no tags at all. Without one, MusicMaid "
-                             "uses tags and file names."))
+        self.acoustid.setPlaceholderText("not needed - MusicMaid's built-in key is used")
+        form.addRow("Own AcoustID key", self.acoustid)
+        form.addRow("", hint("Songs are recognised by their sound with MusicMaid's built-in AcoustID key. Only "
+                             'enter a key here if you want to use <a href="https://acoustid.org/new-application">'
+                             "your own</a>."))
 
         # --- Artwork
         form = page("Artwork")
@@ -1006,19 +1006,17 @@ class AcoustIDDialog(QDialog):
         super().__init__(parent)
         self.lib = lib
         self.never = False
-        self.setWindowTitle("Identify songs by their sound (optional)")
+        self.setWindowTitle("Recognise songs by their sound")
         self.setMinimumWidth(560)
         lay = QVBoxLayout(self)
         intro = QLabel(ACOUSTID_INTRO.replace(ACOUSTID_SIGNUP, f'<a href="{ACOUSTID_SIGNUP}">acoustid.org</a>'))
-        for text in (intro, QLabel(f"<b>{ACOUSTID_WITH.split(':', 1)[0]}:</b>{ACOUSTID_WITH.split(':', 1)[1]}"),
-                     QLabel(f"<b>{ACOUSTID_WITHOUT.split(':', 1)[0]}:</b>{ACOUSTID_WITHOUT.split(':', 1)[1]}"),
-                     QLabel(f"<small>{ACOUSTID_PRIVACY}</small>")):
+        for text in (intro, QLabel(ACOUSTID_WITH), QLabel(ACOUSTID_WITHOUT), QLabel(f"<small>{ACOUSTID_PRIVACY}</small>")):
             text.setWordWrap(True)
             text.setOpenExternalLinks(True)
             lay.addWidget(text)
         row = QHBoxLayout()
         self.key = QLineEdit(lib.settings.acoustid_api_key)
-        self.key.setPlaceholderText("Paste your AcoustID API key here")
+        self.key.setPlaceholderText("optional: your own AcoustID API key (empty = MusicMaid's built-in key)")
         row.addWidget(QLabel("API key"))
         row.addWidget(self.key, 1)
         lay.addLayout(row)
@@ -1026,13 +1024,13 @@ class AcoustIDDialog(QDialog):
         self.result.setWordWrap(True)
         lay.addWidget(self.result)
         buttons = QDialogButtonBox()
-        self.save_btn = buttons.addButton("Check and Save", QDialogButtonBox.ButtonRole.AcceptRole)
-        buttons.addButton("Continue without a key" if first_run else "Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+        self.save_btn = buttons.addButton("Save", QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton("Close", QDialogButtonBox.ButtonRole.RejectRole)
         if first_run:
             never = buttons.addButton("Don't ask again", QDialogButtonBox.ButtonRole.DestructiveRole)
             never.clicked.connect(self._never)
         elif lib.settings.acoustid_api_key:
-            remove = buttons.addButton("Remove Key", QDialogButtonBox.ButtonRole.DestructiveRole)
+            remove = buttons.addButton("Use the Built-in Key", QDialogButtonBox.ButtonRole.DestructiveRole)
             remove.clicked.connect(self._remove)
         self.save_btn.clicked.connect(self.save)
         buttons.rejected.connect(self.reject)
@@ -1041,8 +1039,11 @@ class AcoustIDDialog(QDialog):
     def save(self) -> None:
         from ..providers.acoustid import check_key
         key = self.key.text().strip()
-        if not key:
-            self.result.setText("Paste a key first, or continue without one.")
+        if not key:                      # no own key: use MusicMaid's built-in one
+            self.lib.settings.acoustid_api_key = ""
+            self.lib.settings.offer_acoustid_key = False
+            save_settings(self.lib.settings)
+            self.accept()
             return
         self.result.setText("Checking the key with AcoustID…")
         self.setEnabled(False)

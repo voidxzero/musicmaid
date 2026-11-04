@@ -460,7 +460,7 @@ class MainWindow(QMainWindow):
         self.fill_skin_menu()
         h = m.addMenu("&Help")
         h.addAction(self._act("Check for Updates…", lambda: self.check_updates(manual=True)))
-        h.addAction(self._act("Identify by Sound (AcoustID Key)…", lambda: self.acoustid_key(first_run=False)))
+        h.addAction(self._act("Recognise Songs by Sound…", lambda: self.acoustid_key(first_run=False)))
         h.addAction(self._act("Download fpcalc (Chromaprint)…", self.get_fpcalc))
         h.addAction(self._act("About", self._about))
 

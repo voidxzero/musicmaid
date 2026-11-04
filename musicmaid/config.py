@@ -26,6 +26,10 @@ def data_dir() -> Path:
     return p
 
 
+# MusicMaid's own AcoustID application key, so recognising songs by their sound works out of the box.
+# A personal key entered in Settings takes priority.
+BUILTIN_ACOUSTID_KEY = "2bS0xwIToU"
+
 DEFAULT_PATTERN = "{albumartist}/{album} ({year})/{disc_prefix}{tracknumber:02} - {title}"
 
 
@@ -65,7 +69,7 @@ class Settings:
 
     @property
     def acoustid_key(self) -> str:
-        return self.acoustid_api_key.strip()
+        return self.acoustid_api_key.strip() or BUILTIN_ACOUSTID_KEY
 
     @property
     def quarantine_path(self) -> Path:
