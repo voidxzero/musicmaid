@@ -103,7 +103,9 @@ Only each file's audio fingerprint and length are sent to AcoustID, never the au
 
 ## Typical workflow
 
-1. **Add folder** → **Scan**.
+1. **Add folder** → **Scan**. Your music appears as a folder tree on the left: pick a folder to see its
+   tracks in album order, or *All folders* for everything. The views above the tree (*Needs review*,
+   *Untagged*, …) narrow both the tree and the track list.
 2. **Duplicates** → review the groups → *Remove checked copies*.
 3. Select everything → **Auto-tag**. This runs clean-up, identification and artwork; confident results
    are written, and everything else lands in **Needs review**.
@@ -114,9 +116,11 @@ Only each file's audio fingerprint and length are sent to AcoustID, never the au
 
 ### Terminal UI keys
 
+The left side shows the views (All tracks, Needs review, …) above a **folder tree** of your library; pick a
+folder with `enter` to see its tracks (including subfolders) in album order.
 `space` mark · `ctrl+a` mark all · `/` search · `t` auto-tag · `i` identify · `c` clean up ·
 `w` find artwork · `W` pick artwork · `e` edit tags · `a` apply · `x` discard · `d` duplicates ·
-`o` organize · `u` undo · `f` folders · `,` settings · `l` log · `ctrl+x` cancel task · `q` quit.
+`o` organize · `u` undo · `f` library folders · `,` settings · `l` log · `ctrl+x` cancel task · `?` keys · `q` quit.
 Actions work on marked tracks; with nothing marked, they offer to work on the current view.
 
 ### CLI examples

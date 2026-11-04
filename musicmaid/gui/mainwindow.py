@@ -9,7 +9,8 @@ from PySide6.QtGui import QAction, QBrush, QColor, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDockWidget, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea, QSplitter, QStyle, QTableView, QToolBar, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QScrollArea, QSplitter, QStyle, QTableView, QToolBar, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from .. import APP_NAME, __version__
@@ -20,7 +21,7 @@ from ..config import save_settings
 from ..fingerprint import can_download_fpcalc, download_fpcalc, find_fpcalc
 from ..library import VIEWS, Library
 from .dialogs import AcoustIDDialog, ArtworkDialog, DuplicatesDialog, HistoryDialog, OrganizeDialog, SettingsDialog
-from .. import updater
+from .. import foldertree, updater
 from . import skins
 from .workers import TaskRunner, background
 
@@ -363,15 +364,35 @@ class MainWindow(QMainWindow):
         self.runner.log.connect(self._log)
         self.runner.busy_changed.connect(self._busy)
 
-        # views sidebar
+        # sidebar: the views (what to show) above the folder tree (where)
         self.views = QListWidget()
-        self.views.setMaximumWidth(220)
         for key, label in VIEWS.items():
             it = QListWidgetItem(label)
             it.setData(Qt.ItemDataRole.UserRole, key)
             self.views.addItem(it)
         self.views.setCurrentRow(0)
         self.views.currentItemChanged.connect(self._view_changed)
+        self.views.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._fit_views()
+        self.folder = None                       # folder shown now (None = everything)
+        self.folder_choice = None                # folder the user picked; kept while a view hides it
+        self._view_tracks: list = []
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._tree_menu)
+        self.tree.currentItemChanged.connect(self._folder_changed)
+        sidebar = QWidget()
+        sl = QVBoxLayout(sidebar)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(4)
+        sl.addWidget(self.views)
+        folders_lbl = QLabel("Folders")
+        folders_lbl.setObjectName("dim")
+        sl.addWidget(folders_lbl)
+        sl.addWidget(self.tree, 1)
+        sidebar.setMinimumWidth(200)
 
         # track table
         self.model = TrackModel(self.lib)
@@ -415,11 +436,12 @@ class MainWindow(QMainWindow):
         detail_scroll.setMinimumWidth(340)
 
         split = QSplitter()
-        split.addWidget(self.views)
+        split.addWidget(sidebar)
         split.addWidget(center)
         split.addWidget(detail_scroll)
         split.setStretchFactor(1, 1)
-        split.setSizes([200, 900, 400])
+        split.setSizes([280, 850, 400])
+        self.split = split
         self.setCentralWidget(split)
 
         # log dock
@@ -445,6 +467,7 @@ class MainWindow(QMainWindow):
 
         self._build_actions()
         self._restore_state()
+        self._album_order()
         self.reload()
         QTimer.singleShot(200, self._first_run)
 
@@ -526,6 +549,10 @@ class MainWindow(QMainWindow):
         hdr = qs.value("header")
         if hdr is not None:
             self.table.horizontalHeader().restoreState(hdr)
+        sp = qs.value("splitter")
+        if sp is not None:
+            self.split.restoreState(sp)
+        self.folder_choice = qs.value("folder") or None
 
     def closeEvent(self, e) -> None:
         if self.runner.busy:
@@ -537,6 +564,8 @@ class MainWindow(QMainWindow):
         qs = QSettings(APP_NAME, APP_NAME)
         qs.setValue("geometry", self.saveGeometry())
         qs.setValue("header", self.table.horizontalHeader().saveState())
+        qs.setValue("splitter", self.split.saveState())
+        qs.setValue("folder", self.folder_choice or "")
         super().closeEvent(e)
 
     def _first_run(self) -> None:
@@ -595,11 +624,20 @@ class MainWindow(QMainWindow):
         """Show a skin without saving it (also used for live preview in Settings)."""
         name = skins.apply(name)
         _set_status_colors(name)
+        self.views.ensurePolished()
+        QTimer.singleShot(0, self._fit_views)   # after Qt re-polishes with the new style sheet
         self.table.viewport().update()
         self.detail.show_tracks(self.detail.tracks)   # re-tint proposed-change fields
         for a in self.skin_group.actions():
             a.setChecked(a.text() == name)
         return name
+
+    def _fit_views(self) -> None:
+        """Size the views list to show every view without scrolling (row height depends on the skin)."""
+        self.views.doItemsLayout()
+        rows = sum(self.views.visualItemRect(self.views.item(i)).height() or self.views.sizeHintForRow(i)
+                   for i in range(self.views.count()))
+        self.views.setFixedHeight(rows + 2 * self.views.frameWidth() + 2)
 
     def set_skin(self, name: str) -> None:
         self.lib.settings.skin = self.apply_skin(name)
@@ -745,7 +783,8 @@ class MainWindow(QMainWindow):
         vis = self.visible_ids()
         if not vis:
             return None
-        if QMessageBox.question(self, verb, f"No tracks selected. {verb} all {len(vis)} tracks in this view?") \
+        where = f"in {Path(self.folder).name}" if self.folder else "in this view"
+        if QMessageBox.question(self, verb, f"No tracks selected. {verb} all {len(vis)} tracks {where}?") \
                 == QMessageBox.StandardButton.Yes:
             return vis
         return None
@@ -757,7 +796,17 @@ class MainWindow(QMainWindow):
             it = self.views.item(i)
             key = it.data(Qt.ItemDataRole.UserRole)
             it.setText(f"{VIEWS[key]}  ({counts.get(key, 0)})")
-        self.model.set_tracks(self.lib.view(self.view_name))
+        self._view_tracks = self.lib.view(self.view_name)
+        self._fill_tree(self._view_tracks)
+        self._show_folder(selected)
+        self.status.setText(f"{counts['all']} tracks · {counts['review']} awaiting review · "
+                            f"{counts['problems']} with problems")
+        self._selection_changed()
+
+    def _show_folder(self, selected: set[int] | None = None) -> None:
+        """Fill the table with the current view's tracks in the chosen folder (and below)."""
+        tracks = sorted(foldertree.in_folder(self._view_tracks, self.folder), key=foldertree.album_order)
+        self.model.set_tracks(tracks)
         if selected:
             sm = self.table.selectionModel()
             for r, t in enumerate(self.model.tracks):
@@ -765,9 +814,92 @@ class MainWindow(QMainWindow):
                     idx = self.proxy.mapFromSource(self.model.index(r, 0))
                     if idx.isValid():
                         sm.select(idx, sm.SelectionFlag.Select | sm.SelectionFlag.Rows)
-        self.status.setText(f"{counts['all']} tracks · {counts['review']} awaiting review · "
-                            f"{counts['problems']} with problems")
+
+    # ------------------------------------------------------------ folder tree
+    def _fill_tree(self, tracks) -> None:
+        """Rebuild the tree for the current view, keeping what was expanded and selected."""
+        expanded = set()
+        it = self.tree.invisibleRootItem()
+        stack = [it.child(i) for i in range(it.childCount())]
+        while stack:
+            node = stack.pop()
+            if node.isExpanded():
+                expanded.add(node.data(0, Qt.ItemDataRole.UserRole))
+            stack.extend(node.child(i) for i in range(node.childCount()))
+        first_fill = not hasattr(self, "_tree_filled")
+        self._tree_filled = True
+        nodes = foldertree.build(tracks, self.lib.folders)
+        icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
+        self.tree.blockSignals(True)
+        self.tree.clear()
+        everything = QTreeWidgetItem([f"All folders  ({len(tracks)})"])
+        everything.setData(0, Qt.ItemDataRole.UserRole, "")
+        everything.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_DriveHDIcon))
+        self.tree.addTopLevelItem(everything)
+        items: dict[str, QTreeWidgetItem] = {}
+
+        def add(parent, node, depth):
+            item = QTreeWidgetItem([f"{node.name}  ({node.count})"])
+            item.setData(0, Qt.ItemDataRole.UserRole, node.path)
+            item.setToolTip(0, f"{node.path}\n{node.count} track{'s' if node.count != 1 else ''}")
+            item.setIcon(0, icon)
+            parent.addChild(item)
+            items[node.path] = item
+            for c in node.children:
+                add(item, c, depth + 1)
+            if node.path in expanded or (first_fill and depth == 0):
+                item.setExpanded(True)
+        for n in nodes:
+            add(self.tree.invisibleRootItem(), n, 0)
+        # the chosen folder may not be in this view: fall back to its nearest shown parent, else everything
+        current = everything
+        if self.folder_choice:
+            for cand in (self.folder_choice, *map(str, Path(self.folder_choice).parents)):
+                if cand in items:
+                    current = items[cand]
+                    break
+        self.folder = current.data(0, Qt.ItemDataRole.UserRole) or None
+        self.tree.setCurrentItem(current)
+        p = current.parent()
+        while p is not None:
+            p.setExpanded(True)
+            p = p.parent()
+        self.tree.blockSignals(False)
+
+    def _folder_changed(self, cur, _prev) -> None:
+        if cur is None:
+            return
+        self.folder = self.folder_choice = cur.data(0, Qt.ItemDataRole.UserRole) or None
+        self.table.clearSelection()
+        self._album_order()
+        self._show_folder()
         self._selection_changed()
+
+    def _album_order(self) -> None:
+        """Show tracks in folder / disc / track order (clicking a column header sorts by that column)."""
+        self.table.horizontalHeader().setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+        self.proxy.sort(-1)
+
+    def _tree_menu(self, pos) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        item = self.tree.itemAt(pos)
+        path = item.data(0, Qt.ItemDataRole.UserRole) if item else ""
+        if not path:
+            return
+        menu = QMenu(self)
+        menu.addAction(self._act("Select All Tracks in This Folder", lambda: (self.tree.setCurrentItem(item),
+                                                                           self.table.selectAll())))
+        menu.addAction(self._act("Expand All Below", lambda: self._expand(item, True)))
+        menu.addAction(self._act("Collapse All Below", lambda: self._expand(item, False)))
+        menu.addSeparator()
+        menu.addAction(self._act("Open Folder", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(path))))
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _expand(self, item, on: bool) -> None:
+        item.setExpanded(on)
+        for i in range(item.childCount()):
+            self._expand(item.child(i), on)
 
     def _selection_changed(self) -> None:
         ids = self.selected_ids()

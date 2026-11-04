@@ -1,6 +1,8 @@
 """MusicMaid terminal UI (Textual)."""
 from __future__ import annotations
 
+import os
+
 from rich.table import Table
 from rich.text import Text
 from textual import on, work
@@ -8,7 +10,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
-    DataTable, Footer, Header, Input, Label, ListItem, ListView, ProgressBar, RichLog, Static,
+    DataTable, Footer, Header, Input, Label, ListItem, ListView, ProgressBar, RichLog, Static, Tree,
 )
 
 from .. import APP_NAME, __version__
@@ -16,16 +18,24 @@ from .. import tags as tagio
 from ..cleanup import problems
 from ..config import save_settings
 from ..fingerprint import can_download_fpcalc, download_fpcalc, find_fpcalc
-from .. import updater
+from .. import foldertree, updater
 from ..library import VIEWS, Library
 from .screens import (
     ArtworkScreen, ConfirmScreen, DuplicatesScreen, EditScreen, FoldersScreen, HistoryScreen, InputScreen,
     OrganizeScreen, SettingsScreen, TaskMixin,
 )
 
+KEYS_HELP = (
+    "space  mark track     ctrl+a mark all\n/      search         enter  open folder\nt      auto-tag       "
+    "i      identify\nc      clean up tags  w / W  artwork auto/pick\ne      edit tags      a / x  apply / discard\n"
+    "d      duplicates     o      organize files\nu      undo           f      library folders\n,      settings  "
+    "     l      show log\nctrl+x cancel task    ?      this help"
+)
+
 CSS = """
-#sidebar { width: 26; border-right: solid $primary-darken-2; }
+#sidebar { width: 32; border-right: solid $primary-darken-2; }
 #sidebar ListView { height: auto; }
+#tree { height: 1fr; padding: 0 0; }
 #sidebar .side-title { padding: 0 1; color: $text-muted; text-style: bold; margin-top: 1; }
 #main { width: 1fr; }
 #search { margin: 0 0; }
@@ -81,10 +91,11 @@ class MusicMaidTUI(TaskMixin, App):
         Binding("d", "dupes", "Duplicates"),
         Binding("o", "organize", "Organize"),
         Binding("u", "undo", "Undo"),
-        Binding("f", "folders", "Folders"),
+        Binding("f", "folders", "Library folders"),
         Binding("comma", "settings", "Settings"),
         Binding("l", "toggle_log", "Log", show=False),
         Binding("ctrl+x", "cancel", "Cancel task", show=False),
+        Binding("question_mark", "keys", "Keys"),
     ]
 
     def __init__(self, lib: Library | None = None):
@@ -95,6 +106,9 @@ class MusicMaidTUI(TaskMixin, App):
         self.shown = []
         self.by_id = {}
         self.pending: dict[int, tuple[str, float, bool]] = {}
+        self.folder: str | None = None          # folder shown now (None = all folders)
+        self.folder_choice: str | None = None   # folder the user picked; kept while a view hides it
+        self._tree_filled = False
 
     def check_action(self, action: str, parameters) -> bool | None:
         # library shortcuts only make sense on the main screen (not in dialogs/sub-screens)
@@ -111,14 +125,8 @@ class MusicMaidTUI(TaskMixin, App):
                 yield Label("LIBRARY", classes="side-title")
                 yield ListView(*[ListItem(Label(label, id=f"lbl_{key}"), id=f"view_{key}")
                                  for key, label in VIEWS.items()], id="views")
-                yield Label("KEYS", classes="side-title")
-                yield Static(
-                    "space  mark track\nctrl+a mark all\n/      search\nt      auto-tag\ni      identify\n"
-                    "c      clean up tags\nw / W  artwork auto/pick\ne      edit tags\na / x  apply / discard\n"
-                    "d      duplicates\no      organize files\nu      undo\nf      folders\n,      settings\n"
-                    "l      show log\nctrl+x cancel task",
-                    classes="keys",
-                )
+                yield Label("FOLDERS  (enter to open)", classes="side-title")
+                yield Tree("All folders", data="", id="tree")
             with Vertical(id="main"):
                 yield Input(placeholder="Search artist, title, album, path…  (/)", id="search")
                 yield DataTable(cursor_type="row", zebra_stripes=True, id="tracks")
@@ -161,7 +169,14 @@ class MusicMaidTUI(TaskMixin, App):
             self.query_one(f"#lbl_{key}", Label).update(f"{label} ({counts.get(key, 0)})")
         self.pending = self.lib.db.proposal_summary()
         search = self.query_one("#search", Input).value
-        self.shown = self.lib.view(self.view_name, search)
+        in_view = self.lib.view(self.view_name, search)
+        self._fill_tree(in_view)
+        self._show_tracks(in_view, counts)
+
+    def _show_tracks(self, in_view, counts=None) -> None:
+        counts = counts or self.lib.counts()
+        self._in_view = in_view
+        self.shown = sorted(foldertree.in_folder(in_view, self.folder), key=foldertree.album_order)
         self.by_id = {t.id: t for t in self.shown}
         self.marked &= set(self.by_id)
         table = self.query_one("#tracks", DataTable)
@@ -208,7 +223,7 @@ class MusicMaidTUI(TaskMixin, App):
         detail = self.query_one("#detail", Static)
         t = self._cursor_track()
         if t is None:
-            detail.update("No track selected.\n\nAdd a library folder with F, then scan with S.")
+            detail.update("No track selected.\n\nAdd a library folder with F, then scan with S.\n\n" + KEYS_HELP)
             return
         p = self.lib.db.proposal(t.id)
         tbl = Table.grid(padding=(0, 1))
@@ -251,6 +266,57 @@ class MusicMaidTUI(TaskMixin, App):
             info.append("a = apply, x = discard\n", style="dim")
         from rich.console import Group
         detail.update(Group(info, Text(""), tbl))
+
+    # ------------------------------------------------------------ folder tree
+    def _fill_tree(self, tracks) -> None:
+        """Rebuild the folder tree for this view (and search), keeping what was expanded and chosen."""
+        tree = self.query_one("#tree", Tree)
+        expanded = set()
+        stack = list(tree.root.children)
+        while stack:
+            n = stack.pop()
+            if n.is_expanded:
+                expanded.add(n.data)
+            stack.extend(n.children)
+        first = not self._tree_filled
+        self._tree_filled = True
+        nodes = foldertree.build(tracks, self.lib.folders)
+        tree.clear()
+        tree.root.set_label(f"All folders ({len(tracks)})")
+        tree.root.data = ""
+        by_path = {}
+
+        def add(parent, node, depth):
+            item = parent.add(f"{node.name} ({node.count})", data=node.path,
+                              expand=node.path in expanded or (first and depth == 0),
+                              allow_expand=bool(node.children))
+            by_path[node.path] = item
+            for c in node.children:
+                add(item, c, depth + 1)
+        for n in nodes:
+            add(tree.root, n, 0)
+        tree.root.expand()
+        current = tree.root
+        if self.folder_choice:
+            from pathlib import Path
+            for cand in (self.folder_choice, *map(str, Path(self.folder_choice).parents)):
+                if cand in by_path:
+                    current = by_path[cand]
+                    break
+        self.folder = current.data or None
+        p = current.parent
+        while p is not None:
+            p.expand()
+            p = p.parent
+        self.call_after_refresh(tree.move_cursor, current)
+
+    @on(Tree.NodeSelected, "#tree")
+    def _folder_selected(self, event: Tree.NodeSelected) -> None:
+        self.folder = self.folder_choice = event.node.data or None
+        self._show_tracks(getattr(self, "_in_view", []))
+
+    def action_keys(self) -> None:
+        self.notify(KEYS_HELP, title="Keys", timeout=20)
 
     # ------------------------------------------------------------ events
     @on(ListView.Selected, "#views")
@@ -431,7 +497,8 @@ class MusicMaidTUI(TaskMixin, App):
         def go(ok: bool | None) -> None:
             if ok:
                 self.start_task(f"{verb}…", lambda task: fn(all_ids, task), self._finish(msg))
-        self.push_screen(ConfirmScreen(f"{verb} all {len(all_ids)} tracks in this view?\n"
+        where = f"in {os.path.basename(self.folder)}" if self.folder else "in this view"
+        self.push_screen(ConfirmScreen(f"{verb} all {len(all_ids)} tracks {where}?\n"
                                        "(Mark tracks with space to work on a subset.)", verb), go)
 
     def action_autotag(self) -> None:
