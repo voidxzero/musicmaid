@@ -264,6 +264,31 @@ class Library:
                 task.log(f"Failed to write {t.path}: {e}")
         return res
 
+    # ------------------------------------------------------------ cover images already in the folder
+    IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp")
+    PREFERRED_ART = ("cover", "folder", "front", "album", "albumart", "albumartlarge")
+
+    def folder_images(self, folder: str) -> list[tuple[str, int, int]]:
+        """Image files in an album folder as (path, width, height), the likely front cover first."""
+        out = []
+        try:
+            entries = [p for p in Path(folder).iterdir() if p.suffix.lower() in self.IMAGE_EXT and p.is_file()]
+        except OSError:
+            return []
+        for p in entries:
+            try:
+                _, w, h = tagio.image_info(p.read_bytes())
+            except Exception:
+                continue
+            if w and h:
+                out.append((str(p), w, h))
+        stem = lambda s: Path(s).stem.lower().replace(" ", "").replace("_", "")  # noqa: E731
+        out.sort(key=lambda x: (0 if stem(x[0]) in self.PREFERRED_ART else 1, -(x[1] * x[2])))
+        return out
+
+    def use_folder_image(self, ids: list[int], path: str) -> None:
+        self.propose_artwork(ids, Path(path).read_bytes(), f"folder: {Path(path).name}")
+
     def discard(self, ids: list[int]) -> None:
         self.db.delete_proposals(ids)
 

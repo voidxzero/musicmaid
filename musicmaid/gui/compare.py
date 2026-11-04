@@ -40,16 +40,20 @@ class ArtBox(QWidget):
     """A titled cover-art box; the "New" one accepts dropped images."""
     dropped = Signal(bytes, str)
 
-    def __init__(self, title: str, accept_drops: bool = False):
+    def __init__(self, title: str, accept_drops: bool = False, size: int = ART_SIZE):
         super().__init__()
+        self.size = size
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(2)
         head = QLabel(f"<b>{title}</b>")
         head.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image = QLabel()
-        self.image.setObjectName("cover")
-        self.image.setFixedSize(ART_SIZE + 6, ART_SIZE + 6)
+        self.image.setObjectName("artbox")
+        # an even frame on all sides (the skins' sunken "cover" style hides two edges on dark themes)
+        self.image.setStyleSheet("QLabel#artbox { border: 1px solid palette(mid); border-radius: 3px; "
+                                 "background: palette(base); padding: 0px; }")
+        self.image.setFixedSize(size + 8, size + 8)
         self.image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image.setWordWrap(True)
         self.caption = QLabel()
@@ -62,7 +66,7 @@ class ArtBox(QWidget):
 
     def show_art(self, data: bytes | None, caption: str, empty: str = "No artwork") -> None:
         if data:
-            self.image.setPixmap(_pixmap(data))
+            self.image.setPixmap(_pixmap(data, self.size))
         else:
             self.image.setPixmap(QPixmap())
             self.image.setText(empty)
@@ -86,6 +90,43 @@ class ArtBox(QWidget):
             buf.open(QIODevice.OpenModeFlag.WriteOnly)
             md.imageData().save(buf, "PNG")
             self.dropped.emit(bytes(buf.data()), "dropped image")
+
+
+def folder_art_button(parent, on_pick) -> QPushButton:
+    """A button offering the image files already in the album folder (hidden when there are none)."""
+    b = QPushButton()
+    b.setToolTip("This folder already has a cover image: use it instead")
+    b.setVisible(False)
+    b._images = []
+
+    def clicked():
+        if len(b._images) == 1:
+            on_pick(b._images[0][0])
+    b.clicked.connect(clicked)
+    return b
+
+
+def show_folder_art(b: QPushButton, images: list[tuple[str, int, int]], current_source: str | None, on_pick) -> None:
+    from PySide6.QtWidgets import QMenu
+    images = [i for i in images if f"folder: {Path(i[0]).name}" != (current_source or "")]
+    b._images = images
+    b.setVisible(bool(images))
+    b.setMenu(None)
+    if not images:
+        return
+    from html import escape
+    if len(images) == 1:
+        path, w, h = images[0]
+        b.setText(f"Use {Path(path).name}\nfrom this folder ({w}×{h})")
+        b.setToolTip(f"This folder already has a cover image:<br><img src='{escape(path)}' width='220'>"
+                     f"<br>{escape(Path(path).name)} · {w}×{h}")
+    else:
+        b.setText(f"Use an image\nfrom this folder ({len(images)})…")
+        b.setToolTip("This folder has several images: " + ", ".join(Path(p).name for p, _, _ in images))
+        m = QMenu(b)
+        for path, w, h in images:
+            m.addAction(f"{Path(path).name}  ({w}×{h})", lambda p=path: on_pick(p))
+        b.setMenu(m)
 
 
 def _common(values: list[str]) -> str:
@@ -134,6 +175,8 @@ class ComparePanel(QWidget):
         b.clicked.connect(self._art_from_file)
         art_btns.addWidget(b)
         lay.addLayout(art_btns)
+        self.b_folder_art = folder_art_button(self, self._use_folder_image)
+        lay.addWidget(self.b_folder_art)
 
         self.table = QTableWidget(len(SHOW_FIELDS), 3)
         self.table.setHorizontalHeaderLabels(["", "Original", "New"])
@@ -202,6 +245,7 @@ class ComparePanel(QWidget):
                     self.table.setItem(r, c, QTableWidgetItem(""))
             self.art_old.show_art(None, "")
             self.art_new.show_art(None, "")
+            self.b_folder_art.setVisible(False)
             self.problems.hide()
             self.source.clear()
             self.info.clear()
@@ -298,6 +342,11 @@ class ComparePanel(QWidget):
         else:
             self.art_new.show_art(old_art.data if old_art else None,
                                   "unchanged" if old_art else "", "Drop an image here")
+        # an image file already in the album folder? offer it
+        folders = {t.folder for t in tracks}
+        imgs = self.lib.folder_images(next(iter(folders))) if len(folders) == 1 else []
+        show_folder_art(self.b_folder_art, imgs, p0.art_source if p0 and p0.art is not None else None,
+                        self._use_folder_image)
         # source and buttons
         with_p = [p for p in props.values() if p]
         if with_p:
@@ -333,6 +382,11 @@ class ComparePanel(QWidget):
     def _set_art(self, data: bytes, label: str) -> None:
         if self.tracks:
             self.win.propose_art([t.id for t in self.tracks], data, label)
+
+    def _use_folder_image(self, path: str) -> None:
+        if self.tracks:
+            self.lib.use_folder_image([t.id for t in self.tracks], path)
+            self.win.refresh_tracks()
 
     def _art_from_file(self) -> None:
         if not self.tracks:
@@ -421,12 +475,18 @@ class ReviewWizard(QDialog):
 
         mid = QHBoxLayout()
         arts = QVBoxLayout()
-        self.art_old = ArtBox("Original")
-        self.art_new = ArtBox("New")
+        self.art_old = ArtBox("Original", size=210)
+        self.art_new = ArtBox("New", size=210)
         arts.addWidget(self.art_old)
+        arts.addSpacing(8)
         arts.addWidget(self.art_new)
+        self.b_folder_art = folder_art_button(self, self._use_folder_image)
+        self.b_folder_art.setFixedWidth(218)
+        arts.addWidget(self.b_folder_art)
         arts.addStretch(1)
         mid.addLayout(arts)
+        from PySide6.QtWidgets import QSplitter
+        right = QSplitter(Qt.Orientation.Vertical)
         self.tree = QTreeWidget()
         self.tree.setColumnCount(3)
         self.tree.setHeaderLabels(["", "Original", "New"])
@@ -436,7 +496,33 @@ class ReviewWizard(QDialog):
         self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.tree.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.tree.setColumnWidth(0, 230)
-        mid.addWidget(self.tree, 1)
+        right.addWidget(self.tree)
+        # every track/file of this album, with what will change for each
+        files = QWidget()
+        fl = QVBoxLayout(files)
+        fl.setContentsMargins(0, 4, 0, 0)
+        fl.setSpacing(2)
+        self.files_label = QLabel()
+        self.files_label.setObjectName("dim")
+        fl.addWidget(self.files_label)
+        self.files = QTableWidget(0, 5)
+        self.files.setHorizontalHeaderLabels(["#", "Title", "Artist", "File", "What changes"])
+        self.files.verticalHeader().setVisible(False)
+        self.files.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.files.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.files.setAlternatingRowColors(True)
+        self.files.setWordWrap(False)
+        self.files.verticalHeader().setDefaultSectionSize(22)
+        fh = self.files.horizontalHeader()
+        fh.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        for c in (1, 2, 3, 4):
+            fh.setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
+        self.files.cellDoubleClicked.connect(self._jump_to_track)
+        fl.addWidget(self.files, 1)
+        right.addWidget(files)
+        right.setStretchFactor(0, 3)
+        right.setStretchFactor(1, 2)
+        mid.addWidget(right, 1)
         lay.addLayout(mid, 1)
         self.note = QLabel()
         self.note.setWordWrap(True)
@@ -608,6 +694,11 @@ class ReviewWizard(QDialog):
         self.tree.expandAll()
         for g in folded:
             g.setExpanded(False)
+        self._fill_files(tracks, props, new_num, shared, same_art)
+        folders = {t.folder for t in tracks}
+        cur_src = next((props[t.id].art_source for t in tracks if props[t.id] and props[t.id].art is not None), None)
+        show_folder_art(self.b_folder_art, self.lib.folder_images(next(iter(folders))) if len(folders) == 1 else [],
+                        cur_src, self._use_folder_image)
         self.tree.blockSignals(False)
         srcs = sorted({s for p in props.values() if p for s in p.source.split(", ") if s})
         conf = ""
@@ -629,6 +720,65 @@ class ReviewWizard(QDialog):
         self.note.setText(text)
         self._count()
 
+    def _fill_files(self, tracks, props, new_num, shared, same_art) -> None:
+        from .mainwindow import GREEN
+        bold = QFont()
+        bold.setBold(True)
+        # the other tracks in the same folder(s) too, so you see the whole album
+        folders = sorted({t.folder for t in tracks})
+        ids = {t.id for t in tracks}
+        marks = ",".join("?" * len(folders))
+        others = [t for t in self.lib.db.tracks(where=f"folder IN ({marks})", args=tuple(folders))
+                  if t.id not in ids]
+        for t in others:
+            props.setdefault(t.id, None)
+        def order(t):
+            d, n, name = new_num(t)
+            return (t.id not in ids, d, n or 9999, name)     # changed tracks first, unnumbered last
+        ordered = sorted([*tracks, *others], key=order)
+        self.files.setRowCount(len(ordered))
+        for r, t in enumerate(ordered):
+            p = props[t.id]
+            new = dict(t.tags, **(p.tags if p else {}))
+            changed = [f for f in (p.tags if p else {}) if (p.tags[f] or "") != (t.tags.get(f) or "")]
+            what = [tagio.FIELD_LABELS.get(f, f).lower() for f in changed
+                    if not f.startswith("musicbrainz_") and f != "acoustid_id"]
+            if any(f.startswith("musicbrainz_") for f in changed):
+                what.append("IDs")
+            if p and p.art is not None:
+                what.insert(0, "cover art")
+            num = new_num(t)[1]
+            cells = [str(num) if num else "", new.get("title") or t.filename, new.get("artist", ""), t.filename,
+                     ", ".join(what) or "no changes"]
+            for c, text in enumerate(cells):
+                it = QTableWidgetItem(text)
+                it.setData(Qt.ItemDataRole.UserRole, t.id)
+                if c in (1, 2) and ("title" if c == 1 else "artist") in changed:
+                    it.setFont(bold)
+                    it.setForeground(QColor(GREEN))
+                if c == 3 or t.id not in ids:
+                    it.setForeground(self.palette().color(self.palette().ColorRole.PlaceholderText))
+                if c == 3:
+                    it.setToolTip(t.path)
+                self.files.setItem(r, c, it)
+        self.files_label.setText(f"Tracks in this {'folder' if self.by == 'folder' else 'album'}: {len(ordered)}"
+                                 f" ({len(tracks)} with changes) - double-click one to see its changes")
+
+    def _use_folder_image(self, path: str) -> None:
+        """Use the cover image that's already in the folder for every track of this album."""
+        self.lib.use_folder_image([t.id for t in self.cur], path)
+        self._show()
+
+    def _jump_to_track(self, row: int, _col: int) -> None:
+        tid = self.files.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            if top.toolTip(0) and any(t.id == tid and t.path == top.toolTip(0) for t in self.cur):
+                self.tree.setCurrentItem(top)
+                top.setExpanded(True)
+                self.tree.scrollToItem(top)
+                return
+
     @staticmethod
     def _same_art_everywhere(props) -> bool:
         arts = [p.art for p in props.values() if p and p.art is not None]
@@ -644,8 +794,13 @@ class ReviewWizard(QDialog):
                 yield it
 
     def _count(self) -> None:
-        on = sum(1 for it in self._leaves() if it.checkState(0) == Qt.CheckState.Checked)
-        self.b_apply.setText(f"Apply {on} Change{'s' if on != 1 else ''} && Next ▶" if on else "Next ▶")
+        tids = set()
+        for it in self._leaves():
+            if it.checkState(0) == Qt.CheckState.Checked:
+                tid = it.data(0, Qt.ItemDataRole.UserRole)[0]
+                tids.update(t.id for t in self.cur) if tid == "*" else tids.add(tid)
+        n = len(tids)
+        self.b_apply.setText(f"Apply to {n} Track{'s' if n != 1 else ''} && Next ▶" if n else "Next ▶")
 
     # ------------------------------------------------------------ actions
     def _selection(self) -> tuple[list[int], dict[int, set[str]]]:
@@ -690,6 +845,8 @@ class ReviewWizard(QDialog):
     def _finish(self) -> None:
         s = self.stats
         self.tree.clear()
+        self.files.setRowCount(0)
+        self.files_label.clear()
         self.art_old.show_art(None, "")
         self.art_new.show_art(None, "")
         self.counter.clear()

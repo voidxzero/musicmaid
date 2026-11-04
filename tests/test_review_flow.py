@@ -56,3 +56,19 @@ def test_organize_keep_folders_or_names(home, tmp_path):
     keep_names = lib.organize_plan(ids, "{albumartist}/{album} ({year})/{current_name}", str(root))
     # existing "Air/Moon Safari" folders are reused rather than creating "AIR/moon safari" next to them
     assert keep_names[0].dst == str(root / "Air" / "Moon Safari" / "01 - La Femme.mp3")
+
+
+def test_folder_images_are_found_and_used(home, tmp_path):
+    from PIL import Image
+    lib, root, (a, b, c) = _lib(tmp_path)
+    album = root / "Air" / "Moon Safari"
+    Image.new("RGB", (300, 300), "red").save(album / "back.jpg")
+    Image.new("RGB", (900, 900), "blue").save(album / "Folder.jpg")
+    (album / "notes.txt").write_text("not an image")
+    imgs = lib.folder_images(str(album))
+    assert [os.path.basename(p) for p, _, _ in imgs] == ["Folder.jpg", "back.jpg"]   # the likely cover first
+    assert imgs[0][1:] == (900, 900)
+    ids = [lib.db.track_by_path(str(a)).id, lib.db.track_by_path(str(b)).id]
+    lib.use_folder_image(ids, imgs[0][0])
+    p = lib.db.proposal(ids[0])
+    assert p.art_source == "folder: Folder.jpg" and p.art == (album / "Folder.jpg").read_bytes()
