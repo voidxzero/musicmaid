@@ -179,8 +179,12 @@ class MainWindow(QMainWindow):
 
         # sidebar: the views (what to show) above the folder tree (where)
         self.views = QListWidget()
+        tips = {"all": "Every track in your library", "review": "Tracks with new values waiting for you to apply or "
+                "discard", "untagged": "Tracks without an artist or title", "noart": "Tracks without cover art",
+                "problems": "Tracks with something to fix (shown in red)", "errors": "Files MusicMaid couldn't read"}
         for key, label in VIEWS.items():
             it = QListWidgetItem(label)
+            it.setToolTip(tips.get(key, ""))
             it.setData(Qt.ItemDataRole.UserRole, key)
             self.views.addItem(it)
         self.views.setCurrentRow(0)
@@ -226,6 +230,8 @@ class MainWindow(QMainWindow):
         for i, w in enumerate([58, 170, 160, 210, 170, 130, 40, 50, 90, 100, 55]):
             self.table.setColumnWidth(i, w)
         self.table.selectionModel().selectionChanged.connect(lambda *_: self._sel_timer.start())
+        self.table.doubleClicked.connect(self._play)
+        self.table.setToolTip("")
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
         self._sel_timer = QTimer(self, singleShot=True, interval=120)
@@ -727,8 +733,8 @@ class MainWindow(QMainWindow):
         self._view_tracks = self.lib.view(self.view_name)
         self._fill_tree(self._view_tracks)
         self._show_folder(selected)
-        self.status.setText(f"{counts['all']} tracks · {counts['review']} awaiting review · "
-                            f"{counts['problems']} with problems")
+        self.status.setText(f"{counts['all']} tracks · {counts['problems']} need fixing · "
+                            f"{counts['review']} with changes to review   (double-click a track to play it)")
         self.center.setCurrentIndex(1 if self.lib.folders else 0)
         self.detail_scroll.setVisible(bool(self.lib.folders))
         n = counts["review"]
@@ -917,6 +923,14 @@ class MainWindow(QMainWindow):
         lines = text.count("\n") + 1
         self.status.setText(f"Copied {lines} line{'s' if lines != 1 else ''} to the clipboard" if lines > 1
                             else f"Copied: {text}")
+
+    def _play(self, index) -> None:
+        """Double-click a track: play it in the usual music player."""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        t = self.model.tracks[self.proxy.mapToSource(index).row()]
+        QDesktopServices.openUrl(QUrl.fromLocalFile(t.path))
+        self.status.setText(f"Playing {t.filename}")
 
     def _open_folder(self) -> None:
         from PySide6.QtCore import QUrl
@@ -1132,6 +1146,7 @@ class MainWindow(QMainWindow):
     def duplicates(self) -> None:
         dlg = DuplicatesDialog(self.lib, self.runner, self)
         dlg.changed.connect(self.reload)
+        QTimer.singleShot(0, dlg.find)        # you opened it to find duplicates: start right away
         dlg.exec()
         self.reload()
 

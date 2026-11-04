@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, Signal
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QPlainTextEdit, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
@@ -339,9 +339,15 @@ class DuplicatesDialog(QDialog):
         self.lib, self.runner = lib, runner
         self.groups = []
 
-        self.use_fp = QCheckBox("Compare audio fingerprints")
+        from ..fingerprint import find_fpcalc
+        self.use_fp = QCheckBox("Compare how they sound")
+        self.use_fp.setToolTip("Finds the same song even in different formats or bitrates (audio fingerprints)")
         self.use_fp.setChecked(True)
-        self.use_tags = QCheckBox("Compare artist/title/length")
+        if not find_fpcalc():
+            self.use_fp.setChecked(False)
+            self.use_fp.setEnabled(False)
+            self.use_fp.setToolTip("Needs fpcalc: Settings → Tools can download it")
+        self.use_tags = QCheckBox("Compare artist, title and length")
         self.use_tags.setChecked(True)
         self.same_album = QCheckBox("Only within the same album")
         find = QPushButton("Find duplicates")
@@ -354,7 +360,8 @@ class DuplicatesDialog(QDialog):
         top.addWidget(find)
 
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Remove?", "Artist – Title", "Quality", "Length", "Path"])
+        self.tree.setHeaderLabels(["Remove?", "Artist – Title", "Quality", "Length", "File (inside your library)"])
+        self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.tree.setAlternatingRowColors(True)
         self.tree.header().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         self.tree.setColumnWidth(0, 140)
@@ -403,15 +410,36 @@ class DuplicatesDialog(QDialog):
                 q = f"{t.codec} " + ("lossless" if t.lossless else f"{t.bitrate} kbps")
                 m, s = divmod(int(t.duration), 60)
                 it = QTreeWidgetItem([("keep" if i == 0 else "remove"),
-                                      f"{t.get('artist', '?')} – {t.get('title', t.filename)}", q, f"{m}:{s:02d}", t.path])
+                                      f"{t.get('artist', '?')} – {t.get('title', t.filename)}", q, f"{m}:{s:02d}",
+                                      self._short(t.path)])
+                it.setToolTip(4, t.path)
                 it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 it.setCheckState(0, Qt.CheckState.Unchecked if i == 0 else Qt.CheckState.Checked)
                 it.setData(0, Qt.ItemDataRole.UserRole, (gi, t.id))
                 head.addChild(it)
+                self._paint(it)
             self.tree.addTopLevelItem(head)
             head.setExpanded(True)
         self.tree.blockSignals(False)
+        if not groups:
+            self.summary.setText("<b>No duplicates found.</b>")
+            return
         self._update_summary()
+
+    def _short(self, path: str) -> str:
+        import os
+        for root in sorted(self.lib.folders, key=len, reverse=True):
+            r = root.rstrip("/\\") + os.sep
+            if path.startswith(r):
+                return path[len(r):]
+        return path
+
+    def _paint(self, it: QTreeWidgetItem) -> None:
+        from .mainwindow import GREEN, RED
+        bold = it.font(0)
+        bold.setBold(True)
+        it.setFont(0, bold)
+        it.setForeground(0, QColor(RED) if it.checkState(0) == Qt.CheckState.Checked else QColor(GREEN))
 
     def _item_changed(self, item: QTreeWidgetItem, col: int) -> None:
         if col != 0 or item.parent() is None:
@@ -428,6 +456,7 @@ class DuplicatesDialog(QDialog):
         for i in range(parent.childCount()):
             c = parent.child(i)
             c.setText(0, "remove" if c.checkState(0) == Qt.CheckState.Checked else "keep")
+            self._paint(c)
         self.tree.blockSignals(False)
         self._update_summary()
 

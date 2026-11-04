@@ -148,7 +148,12 @@ works on the selected tracks or the whole library.
 * The **Files** panel under the track list shows everything in the chosen folder (covers, `.cue`, `.log`, …);
   toggle it with F6.
 * Right-click a track or folder to copy its name or path.
-* **Undo** reverses any tag write, rename or removal.
+* **Undo / History** reverses any tag write, rename or removal. Every change is also saved in a
+  **MusicMaid** folder inside your library folder: a readable log of what changed (old → new) plus what's
+  needed to put it back. You can revert one change, or everything since a point in time, even after
+  reinstalling MusicMaid (`musicmaid-cli snapshots` / `musicmaid-cli revert` too). You can turn this off in
+  Settings → Safety & Duplicates.
+* Double-click a track to play it.
 
 ### Terminal UI keys
 
