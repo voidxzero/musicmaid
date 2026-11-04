@@ -120,6 +120,9 @@ Only each file's audio fingerprint and length are sent to AcoustID, never the au
 4. When changes are waiting, a bar above the track list says so. Click **Preview & Apply All**, untick
    anything you don't want, and write the rest; or open **Needs review** to go through them track by track.
    Fix leftovers by hand in the tag editor, or try **Tags from Folder Names** (in the Auto-Tag ▾ menu).
+   Under the track list, the **Files** panel shows everything that's really in the chosen folder (covers,
+   `.cue`, `.log`, …). Clicking an audio file selects its track, and double-clicking opens a file. Toggle the
+   panel with **View → Show Files Panel** (F6).
 5. **Split CUE** turns one-file albums into tracks; **Organize** renames and moves files into a clean folder
    structure. Right-click a track or folder to copy its name or path.
 6. Changed your mind? Use **Undo**.

@@ -443,12 +443,24 @@ class MainWindow(QMainWindow):
             bl.addWidget(b)
         self.banner.hide()
 
+        # the real files of the chosen folder, under the track list
+        from .filespanel import FilesPanel
+        self.files = FilesPanel()
+        self.files.file_clicked.connect(self._select_track_by_path)
+        self.files.status.connect(lambda m: self.status.setText(m))
+        self.vsplit = QSplitter(Qt.Orientation.Vertical)
+        self.vsplit.addWidget(self.table)
+        self.vsplit.addWidget(self.files)
+        self.vsplit.setStretchFactor(0, 3)
+        self.vsplit.setStretchFactor(1, 1)
+        self.vsplit.setSizes([420, 200])
+
         table_page = QWidget()
         cl = QVBoxLayout(table_page)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.addWidget(self.search)
         cl.addWidget(self.banner)
-        cl.addWidget(self.table)
+        cl.addWidget(self.vsplit, 1)
 
         # first start: a welcome page instead of an empty table
         welcome = QWidget()
@@ -569,6 +581,10 @@ class MainWindow(QMainWindow):
         self.a_log = self._act("Show Log", lambda: self.log_dock.setVisible(not self.log_dock.isVisible()), "Ctrl+Shift+L")
         self.a_choose_art = self._act("Choose Artwork…", self.choose_artwork, "Ctrl+Shift+K")
         self.a_select_all = self._act("Select All", self.table.selectAll, "Ctrl+A")
+        self.a_files = self._act("Show Files Panel", lambda on: self.files.setVisible(on), "F6", None,
+                                 "Show every file in the chosen folder (covers, .cue, .log, …) under the track list")
+        self.a_files.setCheckable(True)
+        self.a_files.setChecked(True)
 
         tb = QToolBar("Main")
         tb.setObjectName("main-toolbar")
@@ -608,6 +624,9 @@ class MainWindow(QMainWindow):
         for a in (self.a_dupes, self.a_cue, self.a_org, None, self.a_select_all, self.a_log):
             lib_menu.addSeparator() if a is None else lib_menu.addAction(a)
         v = m.addMenu("&View")
+        v.addAction(self.a_files)
+        v.addAction(self.a_log)
+        v.addSeparator()
         self.skin_menu = v.addMenu("&Skin")
         self.fill_skin_menu()
         h = m.addMenu("&Help")
@@ -627,6 +646,12 @@ class MainWindow(QMainWindow):
         sp = qs.value("splitter")
         if sp is not None:
             self.split.restoreState(sp)
+        vs = qs.value("files_split")
+        if vs is not None:
+            self.vsplit.restoreState(vs)
+        show_files = str(qs.value("files_panel", "true")).lower() != "false"
+        self.a_files.setChecked(show_files)
+        self.files.setVisible(show_files)
         self.folder_choice = qs.value("folder") or None
 
     def closeEvent(self, e) -> None:
@@ -640,6 +665,8 @@ class MainWindow(QMainWindow):
         qs.setValue("geometry", self.saveGeometry())
         qs.setValue("header", self.table.horizontalHeader().saveState())
         qs.setValue("splitter", self.split.saveState())
+        qs.setValue("files_split", self.vsplit.saveState())
+        qs.setValue("files_panel", "true" if self.a_files.isChecked() else "false")
         qs.setValue("folder", self.folder_choice or "")
         super().closeEvent(e)
 
@@ -908,6 +935,8 @@ class MainWindow(QMainWindow):
         """Fill the table with the current view's tracks in the chosen folder (and below)."""
         tracks = sorted(foldertree.in_folder(self._view_tracks, self.folder), key=foldertree.album_order)
         self.model.set_tracks(tracks)
+        roots = self.lib.folders
+        self.files.set_folder(self.folder or (roots[0] if len(roots) == 1 else ""))
         if selected:
             sm = self.table.selectionModel()
             for r, t in enumerate(self.model.tracks):
@@ -1008,8 +1037,23 @@ class MainWindow(QMainWindow):
         for i in range(item.childCount()):
             self._expand(item.child(i), on)
 
+    def _select_track_by_path(self, path: str) -> None:
+        """A file was clicked in the Files panel: select its track in the list."""
+        for r, t in enumerate(self.model.tracks):
+            if t.path == path:
+                idx = self.proxy.mapFromSource(self.model.index(r, 0))
+                if idx.isValid():
+                    self.table.selectRow(idx.row())
+                    self.table.scrollTo(idx)
+                    return
+        self.status.setText("That file isn't in the track list right now (check the view or search, or Rescan)")
+
     def _selection_changed(self) -> None:
         ids = self.selected_ids()
+        if len(ids) == 1:
+            t = next((x for x in self.model.tracks if x.id == ids[0]), None)
+            if t:
+                self.files.show_track(t.path)
         self.detail.show_tracks(self.lib.tracks(ids[:500]) if ids else [])
 
     def _view_changed(self, cur, _prev) -> None:
