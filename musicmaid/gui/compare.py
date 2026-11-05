@@ -253,7 +253,8 @@ class ComparePanel(QWidget):
             self.b_discard.setEnabled(False)
             self.b_apply.setText("Apply")
             return
-        props = {t.id: self.lib.db.proposal(t.id) for t in tracks}
+        found = self.lib.db.proposals([t.id for t in tracks])      # one query, not one per track
+        props = {t.id: found.get(t.id) for t in tracks}
         changed_tracks = sum(1 for p in props.values() if p and (p.tags or p.art is not None))
         t0 = tracks[0]
         title = t0.get("title") or t0.filename
@@ -269,7 +270,7 @@ class ComparePanel(QWidget):
         counts: dict[str, int] = {}
         notes: dict[str, int] = {}
         for t in tracks:
-            probs = find_problems(t, self.lib.settings.artwork_min_size)
+            probs = self.lib.problems_of(t)
             fix = fixable(probs)
             for pr in probs:
                 key = pr.split(" (")[0]

@@ -72,3 +72,24 @@ def test_folder_images_are_found_and_used(home, tmp_path):
     lib.use_folder_image(ids, imgs[0][0])
     p = lib.db.proposal(ids[0])
     assert p.art_source == "folder: Folder.jpg" and p.art == (album / "Folder.jpg").read_bytes()
+
+
+def test_track_cache_stays_in_sync(home, tmp_path):
+    """The in-memory library is patched from the database's change list; it must equal a fresh read."""
+    lib, root, (a, b, c) = _lib(tmp_path)
+    before = lib.counts()
+    ta = lib.db.track_by_path(str(a))
+    lib.set_new_value([ta.id], "title", "")            # make a problem...
+    lib.apply([ta.id])
+    tc = lib.db.track_by_path(str(c))
+    lib.db.remove_tracks([tc.id])                      # ...remove one...
+    moved = str(root / "Air" / "moved.mp3")
+    os.rename(str(b), moved)
+    lib.db.update_path(lib.db.track_by_path(str(b)).id, moved)   # ...and move one
+    cached = {t.id: (t.path, t.tags) for t in lib.view("all")}
+    counts = lib.counts()
+    fresh_lib = Library(db=lib.db)
+    fresh = {t.id: (t.path, t.tags) for t in fresh_lib.view("all")}
+    assert cached == fresh and counts == fresh_lib.counts()
+    assert counts["all"] == before["all"] - 1
+    assert lib.view("problems") and ta.id in {t.id for t in lib.view("problems")}

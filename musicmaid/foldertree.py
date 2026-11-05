@@ -54,12 +54,17 @@ def build(tracks: list[Track], roots: list[str], flag=None) -> list[FolderNode]:
         index[folder] = n
         return n
 
+    per_folder: dict[str, list[int]] = {}
     for t in tracks:
-        n = node_for(_norm(t.folder))
-        flagged = bool(flag(t)) if flag else False
-        # count the track on this node and every ancestor
+        c = per_folder.setdefault(t.folder, [0, 0])
+        c[0] += 1
+        if flag and flag(t):
+            c[1] += 1
+    for folder, (count, flagged) in per_folder.items():
+        n = node_for(_norm(folder))
+        # count this folder's tracks on its node and every ancestor
         while True:
-            n.count += 1
+            n.count += count
             n.flagged += flagged
             parent = os.path.dirname(n.path)
             if n.path in top or parent == n.path:

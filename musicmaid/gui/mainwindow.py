@@ -77,7 +77,7 @@ class TrackModel(QAbstractTableModel):
             src, score, art = self.pending[t.id]
             return "New", GREEN, (f"New values from {src} ({score:.0%} sure) - select the track to compare "
                                   "Original and New, then Apply or Discard")
-        probs = problems(t, self.lib.settings.artwork_min_size)
+        probs = self.lib.problems_of(t)
         if probs and probs[0].startswith("whole album"):
             return "CUE", AMBER, "This one file holds a whole album: select its folder and use Split CUE"
         if fixable(probs):
@@ -95,7 +95,7 @@ class TrackModel(QAbstractTableModel):
             if key == "state":
                 return self._state(t)[0]
             if key == "problems":
-                return ", ".join(problems(t, self.lib.settings.artwork_min_size))
+                return ", ".join(self.lib.problems_of(t))
             if key in ("artist", "album") and not t.get(key) and not t.error:
                 return "missing"
             if key == "format":
@@ -114,7 +114,7 @@ class TrackModel(QAbstractTableModel):
             if key == "state":
                 return QBrush(self._state(t)[1])
             if key == "problems":
-                probs = problems(t, self.lib.settings.artwork_min_size)
+                probs = self.lib.problems_of(t)
                 return QBrush(RED if fixable(probs) else AMBER)
             if key in ("artist", "album") and not t.get(key):
                 return QBrush(RED)
@@ -356,8 +356,24 @@ class MainWindow(QMainWindow):
         self._build_actions()
         self._restore_state()
         self._album_order()
-        self.reload()
+        self._initial_load()
         QTimer.singleShot(200, self._first_run)
+
+    def _initial_load(self) -> None:
+        """Read the library in the background, so the window appears at once even for huge libraries."""
+        if not self.lib.folders:
+            self.reload()
+            return
+        self.status.setText("Loading your library…")
+        self.progress.setRange(0, 0)
+        self.progress.setVisible(True)
+        self._loading = True
+
+        def loaded(_result, error) -> None:
+            self._loading = False
+            self.progress.setVisible(False)
+            self.reload()
+        background(self.lib._all, loaded)
 
     # ------------------------------------------------------------ setup
     def _act(self, text, slot, shortcut=None, icon=None, tip=None) -> QAction:
@@ -702,8 +718,18 @@ class MainWindow(QMainWindow):
         self.log_view.appendPlainText(msg)
 
     def selected_ids(self) -> list[int]:
-        rows = sorted({self.proxy.mapToSource(i).row() for i in self.table.selectionModel().selectedRows()})
-        return [self.model.tracks[r].id for r in rows]
+        # read whole row ranges: selectedRows() asks the model about every cell, far too slow on big lists
+        rows: set[int] = set()
+        for rng in self.table.selectionModel().selection():
+            rows.update(range(rng.top(), rng.bottom() + 1))
+        if not rows:
+            return []
+        proxy, tracks = self.proxy, self.model.tracks
+        if proxy.rowCount() == len(tracks) and not proxy.sortColumn() >= 0:
+            src = sorted(rows)                       # unsorted, unfiltered: proxy rows are source rows
+        else:
+            src = sorted(proxy.mapToSource(proxy.index(r, 0)).row() for r in rows)
+        return [tracks[r].id for r in src if 0 <= r < len(tracks)]
 
     def visible_ids(self) -> list[int]:
         return [self.model.tracks[self.proxy.mapToSource(self.proxy.index(r, 0)).row()].id
@@ -724,6 +750,8 @@ class MainWindow(QMainWindow):
         self.reload()
 
     def reload(self) -> None:
+        if getattr(self, "_loading", False):
+            return              # the initial background load refreshes everything when it's done
         selected = set(self.selected_ids())
         counts = self.lib.counts()
         for i in range(self.views.count()):
@@ -741,11 +769,24 @@ class MainWindow(QMainWindow):
         self.banner.setVisible(n > 0)
         if n:
             unit = "folder" if self.lib.settings.review_group == "folder" else "album"
-            groups = len(self.lib.review_groups(self.lib.settings.review_group))
-            self.banner_text.setText(f"<b>{n} track{'s have' if n != 1 else ' has'} new values waiting</b> "
-                                     f"({groups} {unit}{'s' if groups != 1 else ''}).")
+            self.banner_text.setText(f"<b>{n:,} track{'s have' if n != 1 else ' has'} new values waiting.</b>")
+            self._count_groups(n, unit)
             self.b_review.setText(f"Review {unit.capitalize()} by {unit.capitalize()}…")
         self._selection_changed()
+
+    def _count_groups(self, n: int, unit: str) -> None:
+        """How many albums the waiting changes span: worked out in the background (can take a moment)."""
+        by = self.lib.settings.review_group
+        token = object()
+        self._groups_token = token
+
+        def done(groups, error) -> None:
+            if error or getattr(self, "_groups_token", None) is not token:
+                return
+            g = len(groups)
+            self.banner_text.setText(f"<b>{n:,} track{'s have' if n != 1 else ' has'} new values waiting</b> "
+                                     f"({g:,} {unit}{'s' if g != 1 else ''}).")
+        background(lambda: self.lib.review_groups(by), done)
 
     def show_view(self, key: str) -> None:
         for i in range(self.views.count()):
@@ -762,7 +803,9 @@ class MainWindow(QMainWindow):
 
     def _show_folder(self, selected: set[int] | None = None) -> None:
         """Fill the table with the current view's tracks in the chosen folder (and below)."""
-        tracks = sorted(foldertree.in_folder(self._view_tracks, self.folder), key=foldertree.album_order)
+        order = self.lib.sort_keys()
+        tracks = foldertree.in_folder(self._view_tracks, self.folder)
+        tracks.sort(key=lambda t: order.get(t.id) or foldertree.album_order(t))
         self.model.set_tracks(tracks)
         roots = self.lib.folders
         self.files.set_folder(self.folder or (roots[0] if len(roots) == 1 else ""))
@@ -777,6 +820,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ folder tree
     def _fill_tree(self, tracks) -> None:
         """Rebuild the tree for the current view, keeping what was expanded and selected."""
+        key = (self.lib.db.tracks_version, self.view_name, len(tracks), tuple(self.lib.folders),
+               self.lib.settings.artwork_min_size)
+        if getattr(self, "_tree_key", None) == key:
+            return
+        self._tree_key = key
         expanded = set()
         it = self.tree.invisibleRootItem()
         stack = [it.child(i) for i in range(it.childCount())]
@@ -788,7 +836,8 @@ class MainWindow(QMainWindow):
         first_fill = not hasattr(self, "_tree_filled")
         self._tree_filled = True
         min_art = self.lib.settings.artwork_min_size
-        nodes = foldertree.build(tracks, self.lib.folders, lambda t: fixable(problems(t, min_art)))
+        fix = self.lib.fixable_ids()
+        nodes = foldertree.build(tracks, self.lib.folders, lambda t: t.id in fix)
         icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
         self.tree.blockSignals(True)
         self.tree.clear()
@@ -1186,6 +1235,8 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    # hand the interpreter back to the window quickly while a background task is busy (default 5 ms)
+    sys.setswitchinterval(0.0003)
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(APP_NAME)

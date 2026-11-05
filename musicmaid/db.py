@@ -120,6 +120,13 @@ class Database:
     def __init__(self, path: str | Path | None = None):
         self.path = str(path or data_dir() / "library.db")
         self.listeners: list = []          # called with every journal entry (change snapshots)
+        # bumped on every write, so callers can cache what they read (see Library)
+        self.tracks_version = 0
+        self.proposals_version = 0
+        self._changed: set[int] = set()       # track ids written since the last take_changes()
+        self._removed: set[int] = set()
+        self._changes_lock = threading.Lock()
+        self._summary: dict[int, tuple[str, float, bool]] | None = None   # pending changes, kept in memory
         self._local = threading.local()
         self._write_lock = threading.RLock()
         with self.conn() as c:
@@ -137,6 +144,7 @@ class Database:
 
     # ------------------------------------------------------------ tracks
     def upsert_track(self, path: str, *, size: int, mtime: float, info, tags: dict, artwork, error: str | None = None) -> int:
+        self.tracks_version += 1
         p = Path(path)
         with self._write_lock, self.conn() as c:
             old = c.execute("SELECT id, size, mtime FROM tracks WHERE path=?", (path,)).fetchone()
@@ -155,10 +163,26 @@ class Database:
                 if old[1] != size:
                     sets += ", fp_raw=NULL, fp=NULL, fp_duration=NULL"
                 c.execute(f"UPDATE tracks SET {sets} WHERE id=:id", {**values, "id": old[0]})
+                self._note_changed([old[0]])
                 return old[0]
             cols = ", ".join(values)
             ph = ", ".join(f":{k}" for k in values)
-            return c.execute(f"INSERT INTO tracks ({cols}) VALUES ({ph})", values).lastrowid
+            tid = c.execute(f"INSERT INTO tracks ({cols}) VALUES ({ph})", values).lastrowid
+            self._note_changed([tid])
+            return tid
+
+    def _note_changed(self, ids, removed: bool = False) -> None:
+        with self._changes_lock:
+            (self._removed if removed else self._changed).update(ids)
+            if removed:
+                self._changed.difference_update(ids)
+
+    def take_changes(self) -> tuple[set[int], set[int]]:
+        """Track ids changed and removed since the last call (for incremental caches)."""
+        with self._changes_lock:
+            ch, rm = self._changed, self._removed
+            self._changed, self._removed = set(), set()
+            return ch, rm
 
     def known_files(self, under: str | None = None) -> dict[str, tuple[int, int, float]]:
         q = "SELECT path, id, size, mtime FROM tracks"
@@ -196,15 +220,24 @@ class Database:
         return _row_to_track(r) if r else None
 
     def remove_tracks(self, ids: Iterable[int]) -> None:
+        self.tracks_version += 1
         ids = list(ids)
         with self._write_lock, self.conn() as c:
             c.executemany("DELETE FROM tracks WHERE id=?", [(i,) for i in ids])
+            if self._summary is not None:            # their pending changes go with them (ON DELETE CASCADE)
+                for i in ids:
+                    self._summary.pop(i, None)
+        self.proposals_version += 1
+        self._note_changed(ids, removed=True)
 
     def update_path(self, track_id: int, new_path: str) -> None:
+        self.tracks_version += 1
         with self._write_lock, self.conn() as c:
             c.execute("UPDATE tracks SET path=?, folder=? WHERE id=?", (new_path, str(Path(new_path).parent), track_id))
+        self._note_changed([track_id])
 
     def set_fingerprint(self, track_id: int, raw: bytes | None, fp: str | None, duration: float | None) -> None:
+        self.tracks_version += 1
         with self._write_lock, self.conn() as c:
             if raw is not None:
                 c.execute("UPDATE tracks SET fp_raw=?, fp_duration=? WHERE id=?", (raw, duration, track_id))
@@ -219,6 +252,7 @@ class Database:
 
     # ------------------------------------------------------------ proposals
     def set_proposal(self, p: Proposal, *, merge: bool = True) -> None:
+        self.proposals_version += 1
         with self._write_lock, self.conn() as c:
             if merge:
                 old = self.proposal(p.track_id)
@@ -236,6 +270,8 @@ class Database:
                 " VALUES (?,?,?,?,?,?,?,?)",
                 (p.track_id, json.dumps(p.tags, ensure_ascii=False), p.art, p.art_source, p.source, p.score, p.note, time.time()),
             )
+            if self._summary is not None:
+                self._summary[p.track_id] = (p.source or "", p.score or 0.0, p.art is not None)
 
     def proposal(self, track_id: int) -> Proposal | None:
         r = self.conn().execute(
@@ -245,16 +281,51 @@ class Database:
             return None
         return Proposal(r[0], json.loads(r[1]), r[2], r[3], r[4] or "", r[5] or 0.0, r[6] or "")
 
+    def proposals(self, ids: Iterable[int] | None = None) -> dict[int, Proposal]:
+        """Many proposals in one query (all of them when ids is None)."""
+        q = "SELECT track_id, tags, art, art_source, source, score, note FROM proposals"
+        rows = []
+        if ids is None:
+            rows = list(self.conn().execute(q))
+        else:
+            ids = list(ids)
+            for i in range(0, len(ids), 900):
+                chunk = ids[i:i + 900]
+                rows += list(self.conn().execute(f"{q} WHERE track_id IN ({','.join('?' * len(chunk))})", chunk))
+        return {r[0]: Proposal(r[0], json.loads(r[1] or "{}"), r[2], r[3], r[4] or "", r[5] or 0.0, r[6] or "")
+                for r in rows}
+
+    def proposal_tags(self, ids: Iterable[int]) -> dict[int, dict[str, str]]:
+        """Just the proposed tags (no artwork blobs) of many tracks, in one query."""
+        ids = list(ids)
+        out: dict[int, dict[str, str]] = {}
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            for tid, tags in self.conn().execute(
+                    f"SELECT track_id, tags FROM proposals WHERE track_id IN ({','.join('?' * len(chunk))})", chunk):
+                out[tid] = json.loads(tags or "{}")
+        return out
+
     def proposal_ids(self) -> set[int]:
-        return {r[0] for r in self.conn().execute("SELECT track_id FROM proposals")}
+        return set(self.proposal_summary())
 
     def proposal_summary(self) -> dict[int, tuple[str, float, bool]]:
-        return {r[0]: (r[1] or "", r[2] or 0.0, bool(r[3])) for r in
-                self.conn().execute("SELECT track_id, source, score, art IS NOT NULL FROM proposals")}
+        """{track id: (source, score, has art)} for every pending change. Read from the database once, then
+        kept up to date in memory, so the UI never has to query while a background task is writing."""
+        if self._summary is None:
+            with self._write_lock:
+                self._summary = {r[0]: (r[1] or "", r[2] or 0.0, bool(r[3])) for r in self.conn().execute(
+                    "SELECT track_id, source, score, art IS NOT NULL FROM proposals")}
+        return dict(self._summary)
 
     def delete_proposals(self, ids: Iterable[int]) -> None:
+        self.proposals_version += 1
+        ids = list(ids)
         with self._write_lock, self.conn() as c:
             c.executemany("DELETE FROM proposals WHERE track_id=?", [(i,) for i in ids])
+            if self._summary is not None:
+                for i in ids:
+                    self._summary.pop(i, None)
 
     # ------------------------------------------------------------ journal (undo)
     def new_batch(self) -> str:

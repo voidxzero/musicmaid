@@ -47,6 +47,11 @@ class Library:
         # every change is also written to <library folder>/MusicMaid/Snapshots (see snapshots.py)
         self.recorder = snapshots.Recorder(lambda: self.folders, lambda: self.settings.keep_change_log)
         self.db.listeners.append(self.recorder.record)
+        self._cache = None             # (key, tracks, problems, fixable, untagged, order) - see _all()
+        import threading
+        self._cache_lock = threading.RLock()
+        self._pending = None           # (version, set of track ids with proposals)
+        self._groups = None            # (key, review groups)
 
     # ------------------------------------------------------------ folders & scanning
     @property
@@ -73,19 +78,92 @@ class Library:
     def tracks(self, ids=None) -> list[Track]:
         return self.db.tracks(ids)
 
+    # The whole library is kept in memory and only re-read when the database changed, so browsing,
+    # switching views and redrawing stay fast on big libraries. Problems and sort order are worked out
+    # once per track. Callers must treat the returned Track objects as read-only.
+    def _all(self):
+        with self._cache_lock:
+            key = (self.db.tracks_version, self.settings.artwork_min_size, id(self.db))
+            if self._cache is not None and self._cache[0] == key:
+                return self._cache
+            changed, removed = self.db.take_changes()
+            same_basis = self._cache is not None and self._cache[0][1:] == key[1:]
+            if same_basis and len(changed) + len(removed) < max(500, len(self._cache[1]) // 3):
+                self._cache = self._patch_cache(key, changed, removed)     # only re-read what changed
+            else:
+                self._cache = self._build_cache(key, self.db.tracks())
+            return self._cache
+
+    def _derive(self, t: Track, probs, fix, untagged, order) -> None:
+        from .foldertree import album_order
+        p = cleanup.problems(t, self.settings.artwork_min_size)
+        probs[t.id] = p
+        (fix.add if cleanup.fixable(p) else fix.discard)(t.id)
+        (untagged.add if (not t.error and cleanup.is_untagged(t)) else untagged.discard)(t.id)
+        order[t.id] = album_order(t)
+
+    def _build_cache(self, key, tracks: list[Track]):
+        probs, fix, untagged, order = {}, set(), set(), {}
+        for t in tracks:
+            self._derive(t, probs, fix, untagged, order)
+        return (key, tracks, probs, fix, untagged, order)
+
+    def _patch_cache(self, key, changed: set[int], removed: set[int]):
+        _, tracks, probs, fix, untagged, order = self._cache
+        by_id = {t.id: t for t in tracks}
+        for tid in removed:
+            by_id.pop(tid, None)
+            probs.pop(tid, None)
+            order.pop(tid, None)
+            fix.discard(tid)
+            untagged.discard(tid)
+        for t in self.db.tracks(sorted(changed)):
+            by_id[t.id] = t
+            self._derive(t, probs, fix, untagged, order)
+        for tid in changed - {t.id for t in by_id.values()}:     # changed, then deleted
+            probs.pop(tid, None)
+        tracks = sorted(by_id.values(), key=lambda t: (t.folder, t.path))
+        return (key, tracks, probs, fix, untagged, order)
+
+    def pending_ids(self) -> set[int]:
+        v = (self.db.proposals_version, id(self.db))
+        if self._pending is None or self._pending[0] != v:
+            self._pending = (v, self.db.proposal_ids())
+        return self._pending[1]
+
+    def problems_of(self, t: Track) -> list[str]:
+        c = self._all()
+        p = c[2].get(t.id)
+        return p if p is not None else cleanup.problems(t, self.settings.artwork_min_size)
+
+    def needs_fixing(self, t: Track) -> bool:
+        return t.id in self._all()[3]
+
+    def fixable_ids(self) -> set[int]:
+        return self._all()[3]
+
+    def sort_keys(self) -> dict:
+        return self._all()[5]
+
+    def sort_key(self, t: Track):
+        from .foldertree import album_order
+        return self._all()[5].get(t.id) or album_order(t)
+
     def view(self, name: str = "all", search: str = "") -> list[Track]:
-        tracks = self.db.tracks()
+        _, tracks, _probs, fix, untagged, _order = self._all()
         if name == "review":
-            pids = self.db.proposal_ids()
+            pids = self.pending_ids()
             tracks = [t for t in tracks if t.id in pids]
         elif name == "untagged":
-            tracks = [t for t in tracks if not t.error and cleanup.is_untagged(t)]
+            tracks = [t for t in tracks if t.id in untagged]
         elif name == "noart":
             tracks = [t for t in tracks if not t.error and not t.has_art]
         elif name == "problems":
-            tracks = [t for t in tracks if cleanup.fixable(cleanup.problems(t, self.settings.artwork_min_size))]
+            tracks = [t for t in tracks if t.id in fix]
         elif name == "errors":
             tracks = [t for t in tracks if t.error]
+        else:
+            tracks = list(tracks)
         if search:
             terms = search.lower().split()
             tracks = [t for t in tracks if all(
@@ -93,14 +171,13 @@ class Library:
         return tracks
 
     def counts(self) -> dict[str, int]:
-        tracks = self.db.tracks()
-        pids = self.db.proposal_ids()
+        _, tracks, _probs, fix, untagged, _order = self._all()
         return {
             "all": len(tracks),
-            "review": len(pids),
-            "untagged": sum(1 for t in tracks if not t.error and cleanup.is_untagged(t)),
+            "review": len(self.pending_ids()),
+            "untagged": len(untagged),
             "noart": sum(1 for t in tracks if not t.error and not t.has_art),
-            "problems": sum(1 for t in tracks if cleanup.fixable(cleanup.problems(t, self.settings.artwork_min_size))),
+            "problems": len(fix),
             "errors": sum(1 for t in tracks if t.error),
         }
 
@@ -269,7 +346,23 @@ class Library:
     PREFERRED_ART = ("cover", "folder", "front", "album", "albumart", "albumartlarge")
 
     def folder_images(self, folder: str) -> list[tuple[str, int, int]]:
-        """Image files in an album folder as (path, width, height), the likely front cover first."""
+        """Image files in an album folder as (path, width, height), the likely front cover first.
+        Cached per folder until the folder changes, so clicking through tracks stays quick."""
+        try:
+            stamp = os.stat(folder).st_mtime_ns
+        except OSError:
+            return []
+        cache = self.__dict__.setdefault("_img_cache", {})
+        hit = cache.get(folder)
+        if hit and hit[0] == stamp:
+            return hit[1]
+        out = self._read_folder_images(folder)
+        if len(cache) > 500:
+            cache.clear()
+        cache[folder] = (stamp, out)
+        return out
+
+    def _read_folder_images(self, folder: str) -> list[tuple[str, int, int]]:
         out = []
         try:
             entries = [p for p in Path(folder).iterdir() if p.suffix.lower() in self.IMAGE_EXT and p.is_file()]
@@ -335,20 +428,27 @@ class Library:
 
     def review_groups(self, by: str = "album", ids: set[int] | None = None) -> list[tuple[str, list[Track]]]:
         """Tracks with pending changes, grouped per album (by the new tags) or per folder, in a stable order."""
-        pending = self.db.proposal_ids()
+        cache_key = (by, self.db.proposals_version, self.db.tracks_version, None if ids is None else frozenset(ids))
+        if self._groups is not None and self._groups[0] == cache_key:
+            return self._groups[1]
+        pending = set(self.pending_ids())
         if ids is not None:
             pending &= ids
+        props = self.db.proposal_tags(sorted(pending)) if by != "folder" else {}
         groups: dict[str, list[Track]] = defaultdict(list)
-        for t in self.db.tracks(sorted(pending)):
+        cached = self._all()[1]
+        for t in (t for t in cached if t.id in pending):
             if by == "folder":
                 key = t.folder
             else:
-                new = {**t.tags, **(self.db.proposal(t.id).tags if self.db.proposal(t.id) else {})}
+                new = {**t.tags, **props.get(t.id, {})}
                 artist = new.get("albumartist") or new.get("artist") or ""
                 key = f"{artist} \u2013 {new['album']}" if new.get("album") else t.folder
             groups[key].append(t)
         from .foldertree import album_order
-        return [(k, sorted(v, key=album_order)) for k, v in sorted(groups.items(), key=lambda kv: kv[0].casefold())]
+        out = [(k, sorted(v, key=album_order)) for k, v in sorted(groups.items(), key=lambda kv: kv[0].casefold())]
+        self._groups = (cache_key, out)
+        return out
 
     def edit(self, ids: list[int], changes: dict[str, str], art=tagio._KEEP, task: Task = NULL_TASK) -> ApplyResult:
         """Write manual edits immediately (journaled)."""

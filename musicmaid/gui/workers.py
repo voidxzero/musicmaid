@@ -88,7 +88,16 @@ class TaskRunner(QObject):
             return False
         sig = _Signals()
         self._signals = sig  # keep a reference alive
-        self.task = Task(on_progress=sig.progress.emit, on_log=sig.log.emit)
+        import time
+        last = [0.0, -1]
+
+        def progress(cur: int, total: int, msg: str) -> None:
+            # at most ~20 updates a second: a worker reporting every file/chunk mustn't flood the window
+            now = time.monotonic()
+            if now - last[0] >= 0.05 or cur >= total or total != last[1]:
+                last[0], last[1] = now, total
+                sig.progress.emit(cur, total, msg)
+        self.task = Task(on_progress=progress, on_log=sig.log.emit)
         sig.progress.connect(self.progress)
         sig.log.connect(self.log)
 

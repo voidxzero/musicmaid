@@ -25,6 +25,8 @@ from .screens import (
     OrganizeScreen, SettingsScreen, TaskMixin,
 )
 
+MAX_ROWS = 1500      # rows put in the track table at once (the folder tree and search narrow bigger lists)
+
 KEYS_HELP = (
     "space  mark track     ctrl+a mark all\n/      search         enter  open folder\nt      auto-tag       "
     "i      identify\nc      clean up tags  w / W  artwork auto/pick\ne      edit tags      a / x  apply / discard\n"
@@ -182,18 +184,24 @@ class MusicMaidTUI(TaskMixin, App):
     def _show_tracks(self, in_view, counts=None) -> None:
         counts = counts or self.lib.counts()
         self._in_view = in_view
-        self.shown = sorted(foldertree.in_folder(in_view, self.folder), key=foldertree.album_order)
+        order = self.lib.sort_keys()
+        self.shown = foldertree.in_folder(in_view, self.folder)
+        self.shown.sort(key=lambda t: order.get(t.id) or foldertree.album_order(t))
         self.by_id = {t.id: t for t in self.shown}
         self.marked &= set(self.by_id)
         table = self.query_one("#tracks", DataTable)
         row = table.cursor_row
         table.clear()
-        for t in self.shown:
+        # a terminal table can't show tens of thousands of rows quickly; folders and search narrow it down
+        listed = self.shown[:MAX_ROWS]
+        for t in listed:
             table.add_row(*self._cells(t), key=str(t.id))
-        if self.shown:
-            table.move_cursor(row=min(row, len(self.shown) - 1))
+        if listed:
+            table.move_cursor(row=min(row, len(listed) - 1))
+        more = (f"showing the first {len(listed):,} of {len(self.shown):,} - open a folder or search (/) to narrow"
+                if len(self.shown) > len(listed) else f"{len(self.shown):,} tracks")
         self.query_one("#status", Static).update(
-            f"{len(self.shown)} tracks shown · {len(self.marked)} marked · {counts['review']} awaiting review")
+            f"{more} · {len(self.marked)} marked · {counts['review']} with changes to review")
         self._update_detail()
 
     def _cells(self, t):
@@ -204,7 +212,7 @@ class MusicMaidTUI(TaskMixin, App):
             src, score, _ = self.pending[t.id]
             style = "bold green" if score >= self.lib.settings.auto_apply_threshold else "bold yellow"
             state = Text("±", style=style)
-        elif problems(t, self.lib.settings.artwork_min_size):
+        elif self.lib.problems_of(t):
             state = Text("·", style="red")
         else:
             state = Text("✓", style="green")
@@ -261,7 +269,7 @@ class MusicMaidTUI(TaskMixin, App):
         info.append("\n")
         if t.error:
             info.append(f"\n{t.error}\n", style="bold red")
-        probs = problems(t, self.lib.settings.artwork_min_size)
+        probs = self.lib.problems_of(t)
         if probs:
             info.append("Problems: " + ", ".join(probs) + "\n", style="yellow")
         if p:
@@ -287,7 +295,7 @@ class MusicMaidTUI(TaskMixin, App):
         first = not self._tree_filled
         self._tree_filled = True
         min_art = self.lib.settings.artwork_min_size
-        nodes = foldertree.build(tracks, self.lib.folders, lambda t: fixable(problems(t, min_art)))
+        nodes = foldertree.build(tracks, self.lib.folders, self.lib.needs_fixing)
         tree.clear()
         tree.root.set_label(f"All folders ({len(tracks)})")
         tree.root.data = ""
@@ -679,6 +687,8 @@ class MusicMaidTUI(TaskMixin, App):
 
 
 def main() -> None:
+    import sys
+    sys.setswitchinterval(0.0003)     # keep the screen responsive while a background task is busy
     MusicMaidTUI().run()
 
 
