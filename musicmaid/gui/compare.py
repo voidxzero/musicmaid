@@ -36,29 +36,84 @@ def _pixmap(data: bytes | None, size: int = ART_SIZE) -> QPixmap:
     return pm
 
 
+def _shrinkable(label: QLabel) -> None:
+    """Let a text label wrap (even inside long words) and be narrower than its text, instead of forcing the
+    panel it sits in to grow wider than the window."""
+    from PySide6.QtWidgets import QSizePolicy
+    label.setWordWrap(True)
+    label.setMinimumWidth(0)
+    label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+
+class SquareLabel(QLabel):
+    """A square label that grows with the width it is given and rescales its picture to fill itself."""
+
+    def __init__(self, min_size: int, max_size: int):
+        super().__init__()
+        from PySide6.QtWidgets import QSizePolicy
+        self.src = QPixmap()
+        self.setMinimumSize(min_size, min_size)
+        self.setMaximumSize(max_size, max_size)
+        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, w: int) -> int:
+        return w
+
+    def sizeHint(self):
+        from PySide6.QtCore import QSize
+        return QSize(self.maximumWidth(), self.maximumWidth())
+
+    def set_source(self, pm: QPixmap) -> None:
+        self.src = pm
+        self._rescale()
+
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        if self.height() != self.width():
+            self.setFixedHeight(self.width())      # stay square (the frame is drawn on the label itself)
+        self._rescale()
+
+    def _rescale(self) -> None:
+        if self.src.isNull():
+            self.setPixmap(QPixmap())
+            return
+        side = max(8, min(self.width(), self.height()) - 8)
+        self.setPixmap(self.src.scaled(side, side, Qt.AspectRatioMode.KeepAspectRatio,
+                                       Qt.TransformationMode.SmoothTransformation))
+
+
 class ArtBox(QWidget):
     """A titled cover-art box; the "New" one accepts dropped images."""
     dropped = Signal(bytes, str)
 
-    def __init__(self, title: str, accept_drops: bool = False, size: int = ART_SIZE):
+    def __init__(self, title: str, accept_drops: bool = False, size: int = ART_SIZE, flexible: bool = False):
+        """flexible: the picture grows to fill the width it's given (up to `size`) instead of a fixed square."""
         super().__init__()
         self.size = size
+        self.flexible = flexible
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(2)
         head = QLabel(f"<b>{title}</b>")
         head.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image = QLabel()
+        self.image = SquareLabel(ART_SIZE + 8, size + 8) if flexible else QLabel()
         self.image.setObjectName("artbox")
         # an even frame on all sides (the skins' sunken "cover" style hides two edges on dark themes)
         self.image.setStyleSheet("QLabel#artbox { border: 1px solid palette(mid); border-radius: 3px; "
                                  "background: palette(base); padding: 0px; }")
-        self.image.setFixedSize(size + 8, size + 8)
+        if not flexible:
+            self.image.setFixedSize(size + 8, size + 8)
         self.image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image.setWordWrap(True)
         self.caption = QLabel()
         self.caption.setObjectName("dim")
         self.caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _shrinkable(self.caption)          # a long cover title must wrap, not widen the whole panel
         lay.addWidget(head)
         lay.addWidget(self.image, 0, Qt.AlignmentFlag.AlignHCenter)
         lay.addWidget(self.caption)
@@ -66,8 +121,16 @@ class ArtBox(QWidget):
 
     def show_art(self, data: bytes | None, caption: str, empty: str = "No artwork") -> None:
         if data:
-            self.image.setPixmap(_pixmap(data, self.size))
+            self.image.setText("")
+            if self.flexible:
+                pm = QPixmap()
+                pm.loadFromData(data)
+                self.image.set_source(pm)
+            else:
+                self.image.setPixmap(_pixmap(data, self.size))
         else:
+            if self.flexible:
+                self.image.set_source(QPixmap())
             self.image.setPixmap(QPixmap())
             self.image.setText(empty)
         self.caption.setText(caption)
@@ -158,8 +221,8 @@ class ComparePanel(QWidget):
         lay.addWidget(self.problems)
 
         arts = QHBoxLayout()
-        self.art_old = ArtBox("Original")
-        self.art_new = ArtBox("New", accept_drops=True)
+        self.art_old = ArtBox("Original", size=420, flexible=True)
+        self.art_new = ArtBox("New", accept_drops=True, size=420, flexible=True)
         self.art_new.dropped.connect(self._set_art)
         arts.addWidget(self.art_old)
         arts.addWidget(self.art_new)
@@ -199,7 +262,7 @@ class ComparePanel(QWidget):
         lay.addWidget(self.table, 1)
 
         self.source = QLabel()
-        self.source.setWordWrap(True)
+        _shrinkable(self.source)
         lay.addWidget(self.source)
         hint = QLabel("Double-click a value in the New column to change it yourself.")
         hint.setObjectName("dim")
@@ -220,6 +283,7 @@ class ComparePanel(QWidget):
         self.info.setObjectName("dim")
         self.info.setWordWrap(True)
         self.info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        _shrinkable(self.info)
         lay.addWidget(self.info)
         self.show_tracks([])
 
@@ -392,8 +456,8 @@ class ComparePanel(QWidget):
     def _art_from_file(self) -> None:
         if not self.tracks:
             return
-        p, _ = QFileDialog.getOpenFileName(self, "Choose image", str(Path.home()),
-                                           "Images (*.jpg *.jpeg *.png *.webp)")
+        start = self.tracks[0].folder if Path(self.tracks[0].folder).is_dir() else str(Path.home())
+        p, _ = QFileDialog.getOpenFileName(self, "Choose image", start, "Images (*.jpg *.jpeg *.png *.webp)")
         if p:
             self._set_art(Path(p).read_bytes(), f"file {Path(p).name}")
 

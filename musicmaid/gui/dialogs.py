@@ -900,6 +900,7 @@ class ArtworkDialog(QDialog):
         self.setWindowTitle(f"Artwork — {tags.get('albumartist') or tags.get('artist', '?')} – {tags.get('album', '?')}")
         self.resize(900, 600)
         self.cands = []
+        self.folder = track.folder
         self.result: tuple[bytes, str] | None = None
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(4)
@@ -990,7 +991,8 @@ class ArtworkDialog(QDialog):
         self.accept()
 
     def _from_file(self) -> None:
-        p, _ = QFileDialog.getOpenFileName(self, "Choose image", str(Path.home()), "Images (*.jpg *.jpeg *.png *.webp)")
+        start = self.folder if Path(self.folder).is_dir() else str(Path.home())
+        p, _ = QFileDialog.getOpenFileName(self, "Choose image", start, "Images (*.jpg *.jpeg *.png *.webp)")
         if p:
             self.result = (Path(p).read_bytes(), f"file {Path(p).name}")
             self.accept()

@@ -474,7 +474,7 @@ QTabBar::tab:selected { background: %(panel_bot)s; color: %(text)s; border-top: 
 QTabBar::tab:hover:!selected { color: %(text)s; }
 
 QProgressBar { background: %(lcd_bg)s; border: 1px solid %(inset)s; border-bottom-color: %(hilite)s;
-    border-radius: %(r)s; text-align: center; color: %(lcd_fg)s; font-family: %(MONO)s; height: 16px; }
+    border-radius: %(r)s; text-align: center; color: %(lcd_fg)s; font-family: %(MONO)s; height: 22px; }
 QProgressBar::chunk { border-radius: %(r_small)s;
     background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 %(lcd_fg)s, stop:1 %(lcd_dim)s); }
 
@@ -703,8 +703,6 @@ QToolButton[popupMode="1"] { padding-right: 16px; }
 QToolButton::menu-button { border: none; border-left: 1px solid %(border)s; width: 14px; background: transparent; }
 QToolButton::menu-button:hover { background: %(btn_top)s; }
 QToolButton::menu-arrow { image: url("%(down)s"); width: 9px; height: 9px; }
-QToolBar#selection-bar { spacing: 3px; }
-QToolBar#selection-bar QToolButton { padding: 1px 7px; min-height: 20px; }
 """ % dict(p, down=icons.get("down", ""))
 
 

@@ -121,3 +121,16 @@ def test_txxx_comment_is_read_and_replaced(tmp_path):
     assert tagio.read(f).tags["comment"] == "ripped by www.example.com"
     tagio.write(f, {"comment": ""})
     assert "comment" not in tagio.read(f).tags and not ID3(f).getall("TXXX:comment")
+
+
+def test_mark_fixed(library):
+    library, _root = library
+    fix = set(library.fixable_ids())
+    assert fix
+    ids = sorted(fix)
+    library.mark_fixed(ids[:1])
+    assert library.fixable_ids() == fix - set(ids[:1])
+    t = library.db.track(ids[0])
+    assert library.is_marked_fixed(t)
+    library.mark_fixed(ids[:1], False)
+    assert library.fixable_ids() == fix

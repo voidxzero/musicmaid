@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSettings, QSortFilterProxyModel, Qt, QTimer
-from PySide6.QtGui import QAction, QBrush, QColor, QFont, QKeySequence, QPixmap
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QKeySequence, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDockWidget, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
@@ -51,12 +51,14 @@ class TrackModel(QAbstractTableModel):
         super().__init__()
         self.lib = lib
         self.tracks: list[Track] = []
+        self.context: set[int] = set()
         self.pending: dict[int, tuple[str, float, bool]] = {}
 
-    def set_tracks(self, tracks: list[Track]) -> None:
+    def set_tracks(self, tracks: list[Track], context: set[int] | None = None) -> None:
         self.beginResetModel()
         self.tracks = tracks
         self.pending = self.lib.db.proposal_summary()
+        self.context = context or set()
         self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()) -> int:
@@ -78,6 +80,8 @@ class TrackModel(QAbstractTableModel):
             return "New", GREEN, (f"New values from {src} ({score:.0%} sure) - select the track to compare "
                                   "Original and New, then Apply or Discard")
         probs = self.lib.problems_of(t)
+        if self.lib.is_marked_fixed(t):
+            return "Fixed", GREEN, "You marked this track as fixed" + (": " + ", ".join(probs) if probs else "")
         if probs and probs[0].startswith("whole album"):
             return "CUE", AMBER, "This one file holds a whole album: select its folder and use Split CUE"
         if fixable(probs):
@@ -111,11 +115,13 @@ class TrackModel(QAbstractTableModel):
                 return t.filename
             return t.get(key)
         if role == Qt.ItemDataRole.ForegroundRole:
+            if t.id in self.context and key != "state":      # shown only as context for the others in its folder
+                return QBrush(QApplication.palette().color(QPalette.ColorRole.PlaceholderText))
             if key == "state":
                 return QBrush(self._state(t)[1])
             if key == "problems":
                 probs = self.lib.problems_of(t)
-                return QBrush(RED if fixable(probs) else AMBER)
+                return QBrush(RED if fixable(probs) and not self.lib.is_marked_fixed(t) else AMBER)
             if key in ("artist", "album") and not t.get(key):
                 return QBrush(RED)
             if key == "title" and not t.get("title"):
@@ -229,7 +235,7 @@ class MainWindow(QMainWindow):
         hdr.setStretchLastSection(True)
         for i, w in enumerate([58, 170, 160, 210, 170, 130, 40, 50, 90, 100, 55]):
             self.table.setColumnWidth(i, w)
-        self.table.selectionModel().selectionChanged.connect(lambda *_: self._sel_timer.start())
+        self.table.selectionModel().selectionChanged.connect(self._on_selection)
         self.table.doubleClicked.connect(self._play)
         self.table.setToolTip("")
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -274,10 +280,7 @@ class MainWindow(QMainWindow):
         table_page = QWidget()
         cl = QVBoxLayout(table_page)
         cl.setContentsMargins(0, 0, 0, 0)
-        self.sel_bar = QToolBar("Selected tracks")
-        self.sel_bar.setObjectName("selection-bar")
         cl.addWidget(self.search)
-        cl.addWidget(self.sel_bar)
         cl.addWidget(self.banner)
         cl.addWidget(self.vsplit, 1)
 
@@ -319,6 +322,7 @@ class MainWindow(QMainWindow):
         self.detail = ComparePanel(self)
         detail_scroll = QScrollArea()
         detail_scroll.setWidgetResizable(True)
+        detail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         detail_scroll.setWidget(self.detail)
         detail_scroll.setMinimumWidth(320)
         self.detail_scroll = detail_scroll
@@ -343,7 +347,8 @@ class MainWindow(QMainWindow):
 
         # status bar
         self.progress = QProgressBar()
-        self.progress.setMaximumWidth(260)
+        self.progress.setMinimumSize(480, 24)          # long and tall enough to read at a glance
+        self.progress.setMaximumWidth(640)
         self.progress.setVisible(False)
         self.status = QLabel()
         self.cancel_btn = QPushButton("Cancel")
@@ -423,7 +428,8 @@ class MainWindow(QMainWindow):
         self.a_undo = self._act("Undo / History…", self.undo, "Ctrl+Z", P.SP_ArrowBack,
                                 "See every change made and put things back (one change, or everything since a "
                                 "point in time)")
-        self.a_settings = self._act("Settings", self.settings_dialog, "Ctrl+,", P.SP_FileDialogInfoView)
+        self.a_settings = self._act("Settings", self.settings_dialog, "Ctrl+,", P.SP_FileDialogInfoView,
+                                    "Change MusicMaid's options (look-up sources, naming, appearance)")
         self.a_log = self._act("Show Log", lambda: self.log_dock.setVisible(not self.log_dock.isVisible()),
                                "Ctrl+Shift+L")
         self.a_select_all = self._act("Select All", self.table.selectAll, "Ctrl+A")
@@ -432,28 +438,22 @@ class MainWindow(QMainWindow):
         self.a_files.setCheckable(True)
         self.a_files.setChecked(True)
 
-        tb = QToolBar("Library")
+        # one toolbar for everything. Library-wide tools are always available; the ones that work on tracks
+        # (marked "needs a selection") are greyed out until tracks are selected in the list
+        tb = QToolBar("Tools")
         tb.setObjectName("main-toolbar")
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         tb.setMovable(False)
-        for a in (self.a_add, self.a_scan, None, self.a_fix, self.a_review, None, self.a_dupes, self.a_cue,
-                  self.a_org, None, self.a_undo, self.a_settings):
+        self.sel_actions = [self.a_ident, self.a_art, self.a_choose_art, self.a_clean, self.a_paths,
+                            self.a_apply, self.a_discard]
+        for act in self.sel_actions:
+            act.setToolTip(act.toolTip() + "\n(Select one or more tracks first.)")
+        for a in (self.a_add, self.a_scan, None, self.a_fix, self.a_review, None,
+                  *self.sel_actions, None, self.a_dupes, self.a_cue, self.a_org, None, self.a_undo, self.a_settings):
             tb.addSeparator() if a is None else tb.addAction(a)
         self.addToolBar(tb)
-
-        sb = self.sel_bar
-        sb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        lbl = QLabel(" Selected: ")
-        lbl.setObjectName("dim")
-        sb.addWidget(lbl)
-        # Apply / Discard and the artwork picker live under the Original | New comparison on the right
-        self.a_select_here = self._act("Select All", self.table.selectAll, None, None,
-                                       "Select every track in the list (Ctrl+A)")
-        for a in (self.a_select_here, None, self.a_ident, self.a_art, self.a_clean, self.a_paths):
-            sb.addSeparator() if a is None else sb.addAction(a)
-        from PySide6.QtWidgets import QToolButton
-        for b in sb.findChildren(QToolButton):
-            b.setAutoRaise(False)            # look like buttons, not plain text
+        self._is_busy = False
+        self._update_actions()
 
         m = self.menuBar()
         f = m.addMenu("&File")
@@ -701,9 +701,17 @@ class MainWindow(QMainWindow):
     def _busy(self, busy: bool) -> None:
         self.progress.setVisible(busy)
         self.cancel_btn.setVisible(busy)
-        for a in (self.a_scan, self.a_fix, self.a_review, self.a_ident, self.a_art, self.a_choose_art, self.a_clean,
-                  self.a_paths, self.a_apply, self.a_discard, self.a_dupes, self.a_cue, self.a_org, self.a_undo):
+        self._is_busy = busy
+        self._update_actions()
+
+    def _update_actions(self) -> None:
+        """Library tools are off while a task runs; track tools also need a selection."""
+        busy = getattr(self, "_is_busy", False)
+        has_sel = self.table.selectionModel().hasSelection()
+        for a in (self.a_scan, self.a_fix, self.a_review, self.a_dupes, self.a_cue, self.a_org, self.a_undo):
             a.setEnabled(not busy)
+        for a in self.sel_actions:
+            a.setEnabled(has_sel and not busy)
 
     def _progress(self, cur: int, total: int, msg: str) -> None:
         if total:
@@ -805,8 +813,16 @@ class MainWindow(QMainWindow):
         """Fill the table with the current view's tracks in the chosen folder (and below)."""
         order = self.lib.sort_keys()
         tracks = foldertree.in_folder(self._view_tracks, self.folder)
+        context: set[int] = set()
+        if self.view_name != "all" and tracks:
+            # keep the healthy tracks of those folders in the list (dimmed): they're the context for fixing the rest
+            have = {t.id for t in tracks}
+            folders = {t.folder for t in tracks}
+            extra = [t for t in self.lib.view("all") if t.folder in folders and t.id not in have]
+            context = {t.id for t in extra}
+            tracks += extra
         tracks.sort(key=lambda t: order.get(t.id) or foldertree.album_order(t))
-        self.model.set_tracks(tracks)
+        self.model.set_tracks(tracks, context)
         roots = self.lib.folders
         self.files.set_folder(self.folder or (roots[0] if len(roots) == 1 else ""))
         if selected:
@@ -931,6 +947,10 @@ class MainWindow(QMainWindow):
                     return
         self.status.setText("That file isn't in the track list right now (check the view or search, or Rescan)")
 
+    def _on_selection(self, *_) -> None:
+        self._update_actions()
+        self._sel_timer.start()
+
     def _selection_changed(self) -> None:
         ids = self.selected_ids()
         if len(ids) == 1:
@@ -964,8 +984,26 @@ class MainWindow(QMainWindow):
                   self.a_apply, self.a_discard, None, self.a_org):
             menu.addSeparator() if a is None else menu.addAction(a)
         menu.addSeparator()
+        sel = self.lib.tracks(self.selected_ids()[:500])
+        all_marked = bool(sel) and all(self.lib.is_marked_fixed(t) for t in sel)
+        mf = self._act("Unmark Fixed" if all_marked else "Mark Fixed",
+                       lambda: self.mark_fixed(not all_marked),
+                       tip="Stop listing the selected tracks as needing fixing (and skip them in Fix Whole Library). "
+                           "The files aren't changed." if not all_marked else
+                           "List the selected tracks as needing fixing again")
+        mf.setEnabled(bool(sel))
+        menu.addAction(mf)
         menu.addAction(self._act("Open Containing Folder", self._open_folder))
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def mark_fixed(self, on: bool) -> None:
+        ids = self.selected_ids()
+        if ids:
+            self.lib.mark_fixed(ids, on)
+            self.reload()
+            n = len(ids)
+            self.status.setText(f"{'Marked' if on else 'Unmarked'} {n} track{'s' if n != 1 else ''} "
+                                f"{'as fixed' if on else '(they can show as needing fixing again)'}")
 
     def _copy(self, text: str) -> None:
         QApplication.clipboard().setText(text)

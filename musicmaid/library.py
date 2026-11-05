@@ -47,6 +47,7 @@ class Library:
         # every change is also written to <library folder>/MusicMaid/Snapshots (see snapshots.py)
         self.recorder = snapshots.Recorder(lambda: self.folders, lambda: self.settings.keep_change_log)
         self.db.listeners.append(self.recorder.record)
+        self._marked: set[int] = set()   # tracks the user marked as fixed
         self._cache = None             # (key, tracks, problems, fixable, untagged, order) - see _all()
         import threading
         self._cache_lock = threading.RLock()
@@ -98,11 +99,12 @@ class Library:
         from .foldertree import album_order
         p = cleanup.problems(t, self.settings.artwork_min_size)
         probs[t.id] = p
-        (fix.add if cleanup.fixable(p) else fix.discard)(t.id)
+        (fix.add if cleanup.fixable(p) and t.id not in self._marked else fix.discard)(t.id)
         (untagged.add if (not t.error and cleanup.is_untagged(t)) else untagged.discard)(t.id)
         order[t.id] = album_order(t)
 
     def _build_cache(self, key, tracks: list[Track]):
+        self._marked = self.db.marked_fixed()
         probs, fix, untagged, order = {}, set(), set(), {}
         for t in tracks:
             self._derive(t, probs, fix, untagged, order)
@@ -110,6 +112,7 @@ class Library:
 
     def _patch_cache(self, key, changed: set[int], removed: set[int]):
         _, tracks, probs, fix, untagged, order = self._cache
+        self._marked = self.db.marked_fixed()
         by_id = {t.id: t for t in tracks}
         for tid in removed:
             by_id.pop(tid, None)
@@ -130,6 +133,15 @@ class Library:
         if self._pending is None or self._pending[0] != v:
             self._pending = (v, self.db.proposal_ids())
         return self._pending[1]
+
+    def is_marked_fixed(self, t: Track) -> bool:
+        self._all()
+        return t.id in self._marked
+
+    def mark_fixed(self, ids: list[int], on: bool = True) -> None:
+        """Mark tracks as fixed by hand (or undo that). Marked tracks stop counting as needing fixing and are
+        skipped by Fix Whole Library; their files aren't touched."""
+        self.db.set_marked_fixed(ids, on)
 
     def problems_of(self, t: Track) -> list[str]:
         c = self._all()
@@ -411,6 +423,8 @@ class Library:
         """Whole-library pass: clean up, look up tags and find missing artwork, proposing changes only.
         Nothing is written; the results are reviewed album by album (or folder by folder)."""
         res = {"cleaned": 0, "identified": 0, "artwork": 0}
+        marked = self.db.marked_fixed()
+        ids = [i for i in ids if i not in marked]           # tracks marked as fixed are left alone
         if clean:
             res["cleaned"] = self.cleanup(ids, task)
         if lookup:

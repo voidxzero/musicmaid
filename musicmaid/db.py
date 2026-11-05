@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS proposals (
     source TEXT, score REAL, note TEXT,
     created REAL
 );
+CREATE TABLE IF NOT EXISTS marked_fixed (
+    track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS journal (
     id INTEGER PRIMARY KEY,
     batch TEXT NOT NULL, label TEXT,
@@ -176,6 +179,20 @@ class Database:
             (self._removed if removed else self._changed).update(ids)
             if removed:
                 self._changed.difference_update(ids)
+
+    def marked_fixed(self) -> set[int]:
+        """Tracks the user has marked as fixed (they stop counting as 'needs fixing')."""
+        return {r[0] for r in self.conn().execute("SELECT track_id FROM marked_fixed")}
+
+    def set_marked_fixed(self, ids: Iterable[int], on: bool) -> None:
+        ids = list(ids)
+        self.tracks_version += 1
+        with self._write_lock, self.conn() as c:
+            if on:
+                c.executemany("INSERT OR IGNORE INTO marked_fixed (track_id) VALUES (?)", [(i,) for i in ids])
+            else:
+                c.executemany("DELETE FROM marked_fixed WHERE track_id=?", [(i,) for i in ids])
+        self._note_changed(ids)
 
     def take_changes(self) -> tuple[set[int], set[int]]:
         """Track ids changed and removed since the last call (for incremental caches)."""
