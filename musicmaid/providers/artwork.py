@@ -91,26 +91,27 @@ def search(artist: str, album: str, release_id: str = "", release_group_id: str 
            sources: list[str] | None = None) -> list[ArtCandidate]:
     sources = sources or ["coverartarchive", "itunes", "deezer"]
     out: list[ArtCandidate] = []
-    for s in sources:
+    for s in sources:                      # the order of `sources` is the priority: earlier sources come first
+        found: list[ArtCandidate] = []
         try:
             if s == "coverartarchive":
-                out += coverartarchive(release_id, release_group_id)
+                found = coverartarchive(release_id, release_group_id)
             elif s == "itunes":
-                out += itunes(artist, album)
+                found = itunes(artist, album)
             elif s == "deezer":
-                out += deezer(artist, album)
+                found = deezer(artist, album)
         except net.NetError:
             continue
-    out.sort(key=lambda c: -c.score)
+        out += sorted(found, key=lambda c: -c.score)       # best match first within one source
     return out
 
 
 def best(artist: str, album: str, release_id: str = "", release_group_id: str = "",
          sources: list[str] | None = None, min_score: float = 0.75) -> tuple[ArtCandidate, bytes] | None:
-    """Pick and download the most likely correct cover."""
+    """Pick and download a cover: the first one, by source priority, that is a good enough match."""
     for cand in search(artist, album, release_id, release_group_id, sources):
         if cand.score < min_score:
-            break
+            continue
         data = net.get_bytes(cand.url, timeout=40)
         if data and len(data) > 1000:
             return cand, data

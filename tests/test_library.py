@@ -134,3 +134,15 @@ def test_mark_fixed(library):
     assert library.is_marked_fixed(t)
     library.mark_fixed(ids[:1], False)
     assert library.fixable_ids() == fix
+
+
+def test_artwork_source_priority(monkeypatch):
+    from musicmaid.providers import artwork as aw
+    def cand(src, score):
+        return aw.ArtCandidate(url=src, thumb_url=src, source=src, score=score)
+    monkeypatch.setattr(aw, "itunes", lambda a, b: [cand("itunes", 0.8), cand("itunes", 0.95)])
+    monkeypatch.setattr(aw, "deezer", lambda a, b: [cand("deezer", 0.99)])
+    out = aw.search("a", "b", sources=["itunes", "deezer"])
+    assert [c.source for c in out] == ["itunes", "itunes", "deezer"] and out[0].score == 0.95
+    out = aw.search("a", "b", sources=["deezer", "itunes"])
+    assert out[0].source == "deezer"

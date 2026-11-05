@@ -41,6 +41,16 @@ def _browse_row(edit: QLineEdit, parent, directory: bool = True, caption: str = 
 
 # ---------------------------------------------------------------- settings
 class SettingsDialog(QDialog):
+    def _move_source(self, step: int) -> None:
+        """Move the highlighted cover source up (-1) or down (+1) in the priority list."""
+        row = self.art_list.currentRow()
+        new = row + step
+        if row < 0 or not 0 <= new < self.art_list.count():
+            return
+        it = self.art_list.takeItem(row)
+        self.art_list.insertItem(new, it)
+        self.art_list.setCurrentRow(new)
+
     def __init__(self, lib: Library, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
@@ -97,13 +107,31 @@ class SettingsDialog(QDialog):
 
         # --- Artwork
         form = page("Artwork")
-        self.art_checks = {}
-        for key, label in (("coverartarchive", "Cover Art Archive (by MusicBrainz release)"),
-                           ("itunes", "iTunes / Apple Music"), ("deezer", "Deezer")):
-            cb = QCheckBox(label)
-            cb.setChecked(key in s.artwork_sources)
-            self.art_checks[key] = cb
-            form.addRow("Search" if key == "coverartarchive" else "", cb)
+        labels = {"coverartarchive": "Cover Art Archive (by MusicBrainz release)",
+                  "itunes": "iTunes / Apple Music", "deezer": "Deezer"}
+        self.art_list = QListWidget()
+        self.art_list.setMaximumHeight(84)
+        for key in [k for k in s.artwork_sources if k in labels] + [k for k in labels if k not in s.artwork_sources]:
+            it = QListWidgetItem(labels[key])
+            it.setData(Qt.ItemDataRole.UserRole, key)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked if key in s.artwork_sources else Qt.CheckState.Unchecked)
+            self.art_list.addItem(it)
+        self.art_list.setCurrentRow(0)
+        move = QVBoxLayout()
+        for text, step, tip in (("Move Up", -1, "Try this source earlier"), ("Move Down", 1, "Try this source later")):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, d=step: self._move_source(d))
+            move.addWidget(b)
+        move.addStretch(1)
+        row = QHBoxLayout()
+        row.addWidget(self.art_list, 1)
+        row.addLayout(move)
+        form.addRow("Cover sources", row)
+        form.addRow("", hint("Tick the databases to search. Covers are taken from the top one first: a lower one "
+                             "is used only when the ones above have no good match. Use Move Up / Move Down to "
+                             "change the order."))
         self.art_min = QSpinBox()
         self.art_min.setRange(0, 5000)
         self.art_min.setSuffix(" px")
@@ -316,7 +344,9 @@ class SettingsDialog(QDialog):
         s.prefer_album_releases = self.prefer_album.isChecked()
         s.write_musicbrainz_ids = self.mbids.isChecked()
         s.genre_from_musicbrainz = self.genre.isChecked()
-        s.artwork_sources = [k for k, cb in self.art_checks.items() if cb.isChecked()]
+        s.artwork_sources = [self.art_list.item(i).data(Qt.ItemDataRole.UserRole)
+                             for i in range(self.art_list.count())
+                             if self.art_list.item(i).checkState() == Qt.CheckState.Checked]
         s.artwork_min_size = self.art_min.value()
         s.artwork_max_size = self.art_max.value()
         s.save_cover_jpg = self.cover_jpg.isChecked()
